@@ -581,7 +581,15 @@ class WebhookAdapter(BasePlatformAdapter):
                             event_type: str, delivery_id: str, now: float) -> "web.Response":
         """Record delivery info, spawn the agent run, and return 202 immediately."""
         # delivery_id in the session key → concurrent webhooks on one route get independent runs.
-        session_chat_id = f"webhook:{route_name}:{delivery_id}"
+        # A route may opt into a persistent conversation with a rendered session_key template;
+        # an unresolved template falls back to the one-shot delivery identity.
+        session_key = ""
+        session_key_tpl = route_config.get("session_key", "")
+        if session_key_tpl:
+            session_key = self._render_prompt(session_key_tpl, payload, event_type, route_name).strip()
+            if "{" in session_key:
+                session_key = ""
+        session_chat_id = f"webhook:{route_name}:{session_key or delivery_id}"
         # ``profile`` rides along so the reply leg (``send`` → ``_deliver_cross_platform``) egresses through
         # THIS profile's adapter, home channel and secrets — not the first profile that has the platform.
         self._delivery_info[session_chat_id] = {
@@ -609,7 +617,10 @@ class WebhookAdapter(BasePlatformAdapter):
     async def on_processing_complete(self, event: "MessageEvent", outcome: Any) -> None:
         """Close the one-shot per-delivery session: ``prune_sessions`` only reaps rows with ``ended_at`` set, so
         unclosed webhook sessions leak unbounded. Fires at the true end of the run; ``end_session()`` is
-        first-reason-wins."""
+        first-reason-wins. Persistent (``session_key``) routes keep their session open across turns."""
+        route_name = (event.source.user_id or "").removeprefix("webhook:")
+        if self._routes.get(route_name, {}).get("session_key"):
+            return
         await self._end_webhook_session(event, event.source.chat_id)
 
     async def _end_webhook_session(self, event: "MessageEvent", session_chat_id: str) -> None:
