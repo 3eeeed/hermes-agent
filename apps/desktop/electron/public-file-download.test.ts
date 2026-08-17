@@ -133,10 +133,12 @@ test('downloads real bytes when every resolution stays public', async () => {
 test('streams a large body to completion without stalling on connection teardown', async () => {
   const chunk = Buffer.alloc(64 * 1024, 0x41)
   const chunks = 24
+
   const { port } = await serve((_request, response) => {
     response.writeHead(200, { 'content-length': String(chunk.length * chunks) })
 
     let sent = 0
+
     const push = () => {
       if (sent === chunks) {
         response.end()
@@ -162,3 +164,49 @@ test('streams a large body to completion without stalling on connection teardown
 
   assert.equal(body.length, chunk.length * chunks)
 }, 15_000)
+
+test('closes the connection pool when a caller abandons the response body', async () => {
+  const sockets = { closed: 0, opened: 0 }
+  // A large body keeps the socket busy, which is exactly when an abandoned
+  // response leaks the connection.
+  const payload = Buffer.alloc(2_000_000, 0x41)
+
+  const { port } = await serve((_request, response) => {
+    response.writeHead(200, { 'content-length': String(payload.length) })
+    response.end(payload)
+  })
+
+  cleanupServers[cleanupServers.length - 1].on('connection', socket => {
+    sockets.opened += 1
+    socket.on('close', () => {
+      sockets.closed += 1
+    })
+  })
+
+  for (let index = 0; index < 5; index += 1) {
+    const response = await nodePublicFetch(`http://public.invalid:${port}/abandon-${index}.bin`, {
+      abandonedBodyGraceMs: 200,
+      lookup: publicLookup,
+      socketLookup: (_hostname, _options, callback) => {
+        callback(null, [{ address: '127.0.0.1', family: 4 }] as never)
+      }
+    })
+
+    // Never read the body: the download layer drops it whenever a size or
+    // status check rejects the response.
+    void response
+  }
+
+  const deadline = Date.now() + 8_000
+
+  while (sockets.closed < sockets.opened && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+
+  assert.equal(sockets.opened > 0, true)
+  assert.equal(
+    sockets.closed,
+    sockets.opened,
+    `abandoned bodies leaked connections: opened=${sockets.opened} closed=${sockets.closed}`
+  )
+}, 20_000)
