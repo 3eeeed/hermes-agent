@@ -126,7 +126,11 @@ export function mediaExternalUrl(path: string): string {
   return /^file:/i.test(path) ? path : `file://${path}`
 }
 
-export function mediaContextFileDescriptor(path: string): MediaContextFileDescriptor {
+export function mediaContextFileDescriptor(path: string): MediaContextFileDescriptor | null {
+  if (/^(?:blob|data):/i.test(path)) {
+    return null
+  }
+
   const downloadUrl = mediaExternalUrl(path)
   const remote = /^https?:\/\//i.test(downloadUrl)
 

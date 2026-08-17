@@ -78,6 +78,11 @@ describe('mediaExternalUrl', () => {
     expect(mediaExternalUrl('/tmp/a.png')).toBe('file:///tmp/a.png')
   })
 
+  it('does not describe inline data or blob URLs as copyable files', () => {
+    expect(mediaContextFileDescriptor('data:image/png;base64,ZHVtbXk=')).toBeNull()
+    expect(mediaContextFileDescriptor('blob:https://example.com/image-id')).toBeNull()
+  })
+
   it('keeps the original source separate from the authenticated download URL', () => {
     $connection.set({ mode: 'remote', baseUrl: 'https://gw', token: 's e/cret' } as never)
 
