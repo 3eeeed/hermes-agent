@@ -323,7 +323,13 @@ export function mediaGatewayStreamUrl(path: string): string {
   return mediaExternalUrl(path)
 }
 
-export function mediaContextFileDescriptor(path: string): MediaContextFileDescriptor {
+export function mediaContextFileDescriptor(path: string): MediaContextFileDescriptor | null {
+  // An inline data:/blob: image is no file: there is nothing to open, reveal
+  // or copy as a file, and the payload can be megabytes of DOM attribute.
+  if (/^(?:blob|data):/i.test(path)) {
+    return null
+  }
+
   const downloadUrl = mediaExternalUrl(path)
   const remote = /^https?:\/\//i.test(downloadUrl)
 
@@ -338,7 +344,9 @@ export function mediaContextFileDescriptor(path: string): MediaContextFileDescri
 /** The `data-hermes-context-file` attribute a chat file element carries: the
  *  context menu reads it to offer Open / Copy / Reveal for that file. */
 export function mediaContextFileAttr(path: string): string | undefined {
-  return path ? JSON.stringify(mediaContextFileDescriptor(path)) : undefined
+  const descriptor = path ? mediaContextFileDescriptor(path) : null
+
+  return descriptor ? JSON.stringify(descriptor) : undefined
 }
 
 // Custom Electron scheme (registered in electron/main.ts) that streams a local

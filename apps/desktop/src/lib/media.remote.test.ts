@@ -8,6 +8,7 @@ import {
   gatewayImageProxyDataUrl,
   gatewayMediaDataUrl,
   isInlineMediaSrc,
+  mediaContextFileAttr,
   mediaContextFileDescriptor,
   mediaExternalUrl,
   mediaGatewayStreamUrl,
@@ -168,6 +169,12 @@ describe('mediaGatewayStreamUrl', () => {
 describe('mediaContextFileDescriptor', () => {
   afterEach(() => {
     $connection.set(null)
+  })
+
+  it('does not describe inline data or blob URLs as copyable files', () => {
+    expect(mediaContextFileDescriptor('data:image/png;base64,ZHVtbXk=')).toBeNull()
+    expect(mediaContextFileDescriptor('blob:https://example.com/image-id')).toBeNull()
+    expect(mediaContextFileAttr('data:image/png;base64,ZHVtbXk=')).toBeUndefined()
   })
 
   it('keeps the original source separate from the authenticated download URL', () => {
