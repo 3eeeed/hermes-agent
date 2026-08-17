@@ -102,22 +102,68 @@ export async function nodePublicFetch(rawUrl: string, options: NodePublicFetchOp
   const socketLookup = options.socketLookup || publicSocketLookup()
   const { Agent } = await import('undici')
   const agent = new Agent({ connect: { lookup: socketLookup as never } })
+  const closeAgent = () => {
+    void agent.close().catch(() => undefined)
+  }
+
+  let response: Response
 
   try {
-    return await fetchPublicDownload(rawUrl, {
+    response = await fetchPublicDownload(rawUrl, {
       fetchImpl: (input, init) => fetch(String(input), { ...init, dispatcher: agent } as RequestInit),
       lookup: options.lookup,
       signal: options.signal
     })
   } catch (error) {
+    closeAgent()
+
     // undici reports connect-time failures as an opaque "fetch failed"; surface
     // the guard's reason so blocked private destinations are diagnosable.
     const cause = (error as { cause?: unknown })?.cause
 
     throw cause instanceof Error && /public network/i.test(cause.message) ? cause : error
-  } finally {
-    await agent.close().catch(() => undefined)
   }
+
+  if (!response.body) {
+    closeAgent()
+
+    return response
+  }
+
+  // The agent must outlive the response: closing it in a finally block tears
+  // the connection down before a streamed body is consumed, which stalls every
+  // download larger than one buffer. Close once the body is finished instead.
+  const reader = response.body.getReader()
+  const body = new ReadableStream({
+    cancel: reason => {
+      closeAgent()
+
+      return reader.cancel(reason)
+    },
+    pull: async controller => {
+      try {
+        const { done, value } = await reader.read()
+
+        if (done) {
+          controller.close()
+          closeAgent()
+
+          return
+        }
+
+        controller.enqueue(value)
+      } catch (error) {
+        controller.error(error)
+        closeAgent()
+      }
+    }
+  })
+
+  return new Response(body, {
+    headers: response.headers,
+    status: response.status,
+    statusText: response.statusText
+  })
 }
 
 export interface PublicFetchOptions {
