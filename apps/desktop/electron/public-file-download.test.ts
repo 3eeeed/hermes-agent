@@ -129,3 +129,36 @@ test('downloads real bytes when every resolution stays public', async () => {
   assert.equal(response.status, 200)
   assert.equal(await response.text(), 'public payload')
 })
+
+test('streams a large body to completion without stalling on connection teardown', async () => {
+  const chunk = Buffer.alloc(64 * 1024, 0x41)
+  const chunks = 24
+  const { port } = await serve((_request, response) => {
+    response.writeHead(200, { 'content-length': String(chunk.length * chunks) })
+
+    let sent = 0
+    const push = () => {
+      if (sent === chunks) {
+        response.end()
+
+        return
+      }
+
+      sent += 1
+      response.write(chunk, () => setTimeout(push, 5))
+    }
+
+    push()
+  })
+
+  const response = await nodePublicFetch(`http://public.invalid:${port}/large.bin`, {
+    lookup: publicLookup,
+    socketLookup: (_hostname, _options, callback) => {
+      callback(null, [{ address: '127.0.0.1', family: 4 }] as never)
+    }
+  })
+
+  const body = Buffer.from(await response.arrayBuffer())
+
+  assert.equal(body.length, chunk.length * chunks)
+}, 15_000)
