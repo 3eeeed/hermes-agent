@@ -257,12 +257,14 @@ async function materializeRemoteContextFileOnce(options: MaterializeRemoteContex
   })
 
   if (!response.ok || !response.body) {
+    await response.body?.cancel().catch(() => undefined)
     throw new Error(`Failed to download context file: HTTP ${response.status}`)
   }
 
   const contentLength = Number(response.headers.get('content-length') || 0)
 
   if (contentLength > options.maxBytes) {
+    await response.body.cancel().catch(() => undefined)
     throw new Error(`Remote context file exceeds ${options.maxBytes} bytes`)
   }
 

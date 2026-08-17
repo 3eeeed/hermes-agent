@@ -89,6 +89,7 @@ export function publicSocketLookup(lookupImpl: SocketLookup = dns.lookup as unkn
 }
 
 export interface NodePublicFetchOptions {
+  abandonedBodyGraceMs?: number
   lookup?: PublicLookup
   signal?: AbortSignal
   socketLookup?: SocketLookup
@@ -102,6 +103,7 @@ export async function nodePublicFetch(rawUrl: string, options: NodePublicFetchOp
   const socketLookup = options.socketLookup || publicSocketLookup()
   const { Agent } = await import('undici')
   const agent = new Agent({ connect: { lookup: socketLookup as never } })
+
   const closeAgent = () => {
     void agent.close().catch(() => undefined)
   }
@@ -133,10 +135,40 @@ export async function nodePublicFetch(rawUrl: string, options: NodePublicFetchOp
   // The agent must outlive the response: closing it in a finally block tears
   // the connection down before a streamed body is consumed, which stalls every
   // download larger than one buffer. Close once the body is finished instead.
+  //
+  // A caller can also drop the response without reading it (the cache layer
+  // does exactly that when a size or status check rejects a download). Nothing
+  // would then close the agent, so the socket stays open. An idle watchdog
+  // cancels a body that stops being read before it completes.
   const reader = response.body.getReader()
+  const graceMs = options.abandonedBodyGraceMs ?? 30_000
+  let settled = false
+  let idleTimer: ReturnType<typeof setTimeout> | undefined
+
+  const settle = () => {
+    if (settled) {
+      return
+    }
+
+    settled = true
+    clearTimeout(idleTimer)
+    closeAgent()
+  }
+
+  const armIdleWatchdog = () => {
+    clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => {
+      void reader.cancel(new Error('Response body was abandoned before completion')).catch(() => undefined)
+      settle()
+    }, graceMs)
+    idleTimer.unref?.()
+  }
+
+  armIdleWatchdog()
+
   const body = new ReadableStream({
     cancel: reason => {
-      closeAgent()
+      settle()
 
       return reader.cancel(reason)
     },
@@ -146,15 +178,18 @@ export async function nodePublicFetch(rawUrl: string, options: NodePublicFetchOp
 
         if (done) {
           controller.close()
-          closeAgent()
+          settle()
 
           return
         }
 
         controller.enqueue(value)
+        // Progress resets the watchdog, so only a stalled or dropped consumer
+        // trips it.
+        armIdleWatchdog()
       } catch (error) {
         controller.error(error)
-        closeAgent()
+        settle()
       }
     }
   })
