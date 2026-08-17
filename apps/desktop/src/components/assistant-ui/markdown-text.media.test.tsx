@@ -50,9 +50,8 @@ describe('MarkdownTextContent remote images', () => {
 
     expect(image.getAttribute('src')).toBe(REMOTE_IMAGE_DATA_URL)
     expect(JSON.parse(image.getAttribute('data-hermes-context-file') || '{}')).toMatchObject({
-      downloadUrl:
-        'https://gw/api/files/download?path=%2Fhome%2Fuser%2Fproject%2Fimages%2Fremote-preview.png&token=secret',
-      remote: true,
+      kind: 'gateway',
+      profile: 'remote-work',
       source: REMOTE_IMAGE_PATH
     })
     expect(api).toHaveBeenCalledWith({
@@ -72,7 +71,7 @@ describe('MarkdownTextContent remote images', () => {
     const image = await screen.findByRole('img', { name: 'remote-preview.png' })
 
     expect(JSON.parse(image.getAttribute('data-hermes-context-file') || '{}')).toMatchObject({
-      remote: true,
+      kind: 'gateway',
       source: REMOTE_IMAGE_PATH
     })
   })
@@ -95,7 +94,7 @@ describe('MarkdownImage media routing', () => {
     expect(contextTarget).not.toBeNull()
     expect(JSON.parse(contextTarget?.getAttribute('data-hermes-context-file') || '{}')).toMatchObject({
       name: 'clip.mp4',
-      remote: false,
+      kind: 'local',
       source: 'file:///tmp/clip.mp4'
     })
   })
@@ -109,7 +108,7 @@ describe('MarkdownImage media routing', () => {
     const contextTarget = container.querySelector('audio')?.closest('[data-hermes-context-file]')
     expect(JSON.parse(contextTarget?.getAttribute('data-hermes-context-file') || '{}')).toMatchObject({
       name: 'note.mp3',
-      remote: false,
+      kind: 'local',
       source: 'file:///tmp/note.mp3'
     })
   })
@@ -122,7 +121,7 @@ describe('MarkdownImage media routing', () => {
 
     expect(JSON.parse(contextTarget?.getAttribute('data-hermes-context-file') || '{}')).toMatchObject({
       name: 'factory review.pdf',
-      remote: false,
+      kind: 'local',
       source: '/tmp/factory review.pdf'
     })
   })
@@ -135,7 +134,7 @@ describe('MarkdownImage media routing', () => {
 
     expect(JSON.parse(contextTarget?.getAttribute('data-hermes-context-file') || '{}')).toMatchObject({
       name: 'product spec.pdf',
-      remote: false,
+      kind: 'local',
       source: '/tmp/product spec.pdf'
     })
   })
@@ -151,7 +150,7 @@ describe('MarkdownImage media routing', () => {
     const contextTarget = image?.closest('[data-hermes-context-file]')
     expect(JSON.parse(contextTarget?.getAttribute('data-hermes-context-file') || '{}')).toMatchObject({
       name: 'pic.png',
-      remote: false,
+      kind: 'local',
       source: 'file:///tmp/pic.png'
     })
   })

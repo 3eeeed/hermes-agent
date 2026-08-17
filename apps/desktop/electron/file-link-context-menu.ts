@@ -15,17 +15,18 @@ export interface FileLinkMenuItem {
 }
 
 export interface FileLinkContextMenuModel {
-  downloadUrl?: string
   items: FileLinkMenuItem[]
   kind: 'local-file' | 'remote-file' | 'web-link'
   name?: string
+  profile?: string
+  remoteKind?: 'external' | 'gateway'
   source: string
 }
 
 interface ContextFileDescriptor {
-  downloadUrl?: string
+  kind: 'external' | 'gateway' | 'local'
   name: string
-  remote: boolean
+  profile?: string
   source: string
 }
 
@@ -75,37 +76,71 @@ export function contextMenuModelForContextFile(
 
   try {
     const value = JSON.parse(rawDescriptor) as Partial<ContextFileDescriptor>
-    const source = typeof value.source === 'string' ? value.source.trim() : ''
-    const name = typeof value.name === 'string' ? value.name.trim() : ''
+    const keys = value && typeof value === 'object' ? Object.keys(value) : []
 
-    if (!source || !name || source.length > 16_384 || name.length > 1_024 || typeof value.remote !== 'boolean') {
+    if (keys.some(key => !['kind', 'name', 'profile', 'source'].includes(key))) {
       return null
     }
 
-    if (value.remote) {
-      const downloadUrl = typeof value.downloadUrl === 'string' ? value.downloadUrl : ''
+    const source = typeof value.source === 'string' ? value.source.trim() : ''
+    const name = typeof value.name === 'string' ? value.name.trim() : ''
+    const kind = value.kind
+    const profile = typeof value.profile === 'string' ? value.profile.trim() : ''
 
-      if (!/^https?:\/\//i.test(downloadUrl)) {
-        return null
-      }
+    if (
+      !source ||
+      !name ||
+      source.length > 16_384 ||
+      name.length > 1_024 ||
+      !['external', 'gateway', 'local'].includes(kind || '') ||
+      (profile && !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(profile))
+    ) {
+      return null
+    }
 
+    if (kind === 'external' && !/^https?:\/\//i.test(source)) {
+      return null
+    }
+
+    const hasNonFileScheme =
+      /^[a-z][a-z\d+.-]*:/i.test(source) && !/^file:/i.test(source) && !/^[a-z]:[\\/]/i.test(source)
+
+    if (kind !== 'external' && hasNonFileScheme) {
+      return null
+    }
+
+    if (kind === 'local') {
       return {
-        kind: 'remote-file',
+        kind: 'local-file',
         source,
         name,
-        downloadUrl,
         items: fileMenuItems(platform)
       }
     }
 
     return {
-      kind: 'local-file',
+      kind: 'remote-file',
+      remoteKind: kind,
       source,
       name,
+      ...(profile ? { profile } : {}),
       items: fileMenuItems(platform)
     }
   } catch {
     return null
+  }
+}
+
+export function contextMenuTargetModels(
+  descriptorModel: FileLinkContextMenuModel | null,
+  linkModel: FileLinkContextMenuModel | null
+): {
+  contextFileModel: FileLinkContextMenuModel | null
+  ordinaryLinkModel: FileLinkContextMenuModel | null
+} {
+  return {
+    contextFileModel: descriptorModel ?? (linkModel?.kind === 'web-link' ? null : linkModel),
+    ordinaryLinkModel: linkModel?.kind === 'web-link' ? linkModel : null
   }
 }
 
@@ -122,7 +157,7 @@ export function contextMenuModelForLink(
       kind: remote ? 'remote-file' : 'local-file',
       source: mediaSource,
       name: params.suggestedFilename || undefined,
-      ...(remote ? { downloadUrl: mediaSource } : {}),
+      ...(remote ? { remoteKind: 'external' as const } : {}),
       items: fileMenuItems(platform)
     }
   }

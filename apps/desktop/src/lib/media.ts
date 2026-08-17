@@ -3,9 +3,9 @@ import { capitalize } from '@/lib/text'
 import { $connection } from '@/store/session'
 
 export interface MediaContextFileDescriptor {
-  downloadUrl?: string
+  kind: 'external' | 'gateway' | 'local'
   name: string
-  remote: boolean
+  profile?: string
   source: string
 }
 
@@ -131,14 +131,14 @@ export function mediaContextFileDescriptor(path: string): MediaContextFileDescri
     return null
   }
 
-  const downloadUrl = mediaExternalUrl(path)
-  const remote = /^https?:\/\//i.test(downloadUrl)
+  const connection = $connection.get()
+  const kind = /^https?:\/\//i.test(path) ? 'external' : isRemoteGateway() ? 'gateway' : 'local'
 
   return {
+    kind,
     source: path,
     name: mediaName(path),
-    remote,
-    ...(remote ? { downloadUrl } : {})
+    ...(kind === 'gateway' && connection?.profile ? { profile: connection.profile } : {})
   }
 }
 

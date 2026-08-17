@@ -12,6 +12,7 @@ import {
   localPreviewTarget,
   normalizeOrLocalPreviewTarget,
   openPreviewTargetInBrowser,
+  previewContextFileSource,
   remoteHtmlPreviewDocument,
   validatedRemoteHtmlDataUrl
 } from './local-preview'
@@ -166,6 +167,12 @@ describe('remote HTML previews', () => {
       openPreviewTargetInBrowser({ ...remoteTarget, renderMode: 'source', transient: true })
     ).rejects.toThrow('Remote HTML preview could not be loaded')
     expect(openPreviewInBrowser).not.toHaveBeenCalled()
+  })
+})
+
+describe('preview context files', () => {
+  it('resolves relative attachment paths against the transcript session cwd', () => {
+    expect(previewContextFileSource('reports/factory.pdf', '/srv/project')).toBe('/srv/project/reports/factory.pdf')
   })
 })
 

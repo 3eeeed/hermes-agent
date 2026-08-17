@@ -6,7 +6,7 @@ import https from 'node:https'
 import os from 'node:os'
 import path from 'node:path'
 import tls from 'node:tls'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import {
   app,
@@ -81,8 +81,9 @@ import {
   savedProfileSsh,
   tokenPreview
 } from './connection-config'
-import { runContextFileAction } from './context-file-actions'
+import { contextFileActionErrorMessage, runContextFileAction } from './context-file-actions'
 import { materializeLocalContextFile, materializeRemoteContextFile } from './context-file-cache'
+import { createContextMenuSequencer } from './context-menu-sequencer'
 import { describeCrashReason, installCrashForensics } from './crash-forensics'
 import { adoptServedDashboardToken } from './dashboard-token'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
@@ -98,7 +99,11 @@ import {
 import { describeDevCdpDecision, resolveDevCdpPort } from './dev-cdp'
 import { installEmbedReferer } from './embed-referer'
 import { createEventDeduper } from './event-dedupe'
-import { contextMenuModelForContextFile, contextMenuModelForLink } from './file-link-context-menu'
+import {
+  contextMenuModelForContextFile,
+  contextMenuModelForLink,
+  contextMenuTargetModels
+} from './file-link-context-menu'
 import { findGitBash as _findGitBash } from './find-git-bash'
 import { installFoundInPageForwarder, performFind, stopFind } from './find-in-page'
 import { createFirstRunSetupGate } from './first-run-setup-gate'
@@ -179,6 +184,7 @@ import { FirstRunSetupResetError, runPrimaryBackendStartup } from './primary-bac
 import { rehomePrimaryConnection } from './primary-connection-rehome'
 import { decideProfileDeleteAction, profileNameFromDeleteRequest, resolveRouteProfile } from './profile-delete-routing'
 import { fetchPrimaryProfileSessions } from './profile-session-routing'
+import { nodePublicFetch } from './public-file-download'
 import { createQuickEntryShortcut, quickEntryWindowBounds, sanitizeQuickEntrySettings } from './quick-entry'
 import { type ActiveWork, mergeActiveWork, normalizeActiveWork, quitPromptFor } from './quit-guard'
 import * as remoteLifecycle from './remote-lifecycle'
@@ -5566,18 +5572,81 @@ function runContextFileClipboardCommand(command, args) {
   })
 }
 
-async function materializeContextMenuFile(model) {
-  if (model.kind === 'remote-file') {
-    if (!model.downloadUrl) {
-      throw new Error('Remote context file is missing a download URL')
+async function fetchGatewayContextFile(connection, url, signal) {
+  if (connection.authMode === 'oauth') {
+    const accessToken = await ensureNativeAccessToken(connection.baseUrl).catch(() => null)
+
+    if (accessToken) {
+      return electronNet.fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        redirect: 'error',
+        signal
+      })
     }
 
+    return getOauthSession().fetch(url, { redirect: 'error', signal })
+  }
+
+  return electronNet.fetch(url.toString(), {
+    headers: { 'X-Hermes-Session-Token': connection.token },
+    redirect: 'error',
+    signal
+  })
+}
+
+function gatewayContextFilePath(source) {
+  const candidate = /^file:/i.test(source) ? fileURLToPath(source) : source
+
+  if (!candidate || candidate.includes('\0') || (/^[a-z][a-z\d+.-]*:/i.test(candidate) && !/^[a-z]:[\\/]/i.test(candidate))) {
+    throw new Error('Gateway context file source must be a filesystem path')
+  }
+
+  return candidate
+}
+
+async function materializeContextMenuFile(model) {
+  if (model.kind === 'remote-file') {
+    if (!model.remoteKind) {
+      throw new Error('Remote context file is missing a trusted source kind')
+    }
+
+    if (model.remoteKind === 'external') {
+      return materializeRemoteContextFile({
+        cacheKey: `external:${model.source}`,
+        cacheRoot: path.join(app.getPath('userData'), 'context-file-cache'),
+        fetchImpl: (input, init) => nodePublicFetch(String(input), { signal: init?.signal }),
+        maxBytes: CONTEXT_FILE_CACHE_MAX_BYTES,
+        suggestedFilename: model.name,
+        timeoutMs: CONTEXT_FILE_DOWNLOAD_TIMEOUT_MS,
+        url: model.source
+      })
+    }
+
+    const activeProfile = readActiveDesktopProfile() || 'default'
+    const requestedProfile = model.profile || activeProfile
+
+    if (requestedProfile !== activeProfile) {
+      throw new Error('Gateway context file profile does not match the active desktop profile')
+    }
+
+    const connection = await ensureBackend(activeProfile)
+    const gatewayUrl = new URL('/api/files/download', connection.baseUrl)
+
+    if (!['http:', 'https:'].includes(gatewayUrl.protocol) || gatewayUrl.username || gatewayUrl.password) {
+      throw new Error('Gateway context file connection is invalid')
+    }
+
+    const gatewayPath = gatewayContextFilePath(model.source)
+    gatewayUrl.searchParams.set('path', gatewayPath)
+
     return materializeRemoteContextFile({
-      cacheRoot: path.join(app.getPath('temp'), 'hermes-context-files'),
+      cacheKey: `gateway:${gatewayUrl.origin}:${activeProfile}:${gatewayPath}`,
+      cacheRoot: path.join(app.getPath('userData'), 'context-file-cache'),
+      fetchImpl: (_input, init) => fetchGatewayContextFile(connection, gatewayUrl, init?.signal),
       maxBytes: CONTEXT_FILE_CACHE_MAX_BYTES,
       suggestedFilename: model.name,
       timeoutMs: CONTEXT_FILE_DOWNLOAD_TIMEOUT_MS,
-      url: model.downloadUrl
+      url: gatewayUrl.toString()
     })
   }
 
@@ -5609,7 +5678,7 @@ function contextFileActionDependencies() {
   }
 }
 
-async function showContextMenu(window, params) {
+async function showContextMenu(window, params, isCurrent = () => true) {
   const rawDescriptor = await contextFileDescriptorAtPoint(window, params)
   const platform = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
   const descriptorModel = rawDescriptor ? contextMenuModelForContextFile(rawDescriptor, platform) : null
@@ -5621,11 +5690,11 @@ async function showContextMenu(window, params) {
       )
     : null
 
-  const contextFileModel = descriptorModel ?? (linkModel?.kind === 'web-link' ? null : linkModel)
+  const { contextFileModel, ordinaryLinkModel } = contextMenuTargetModels(descriptorModel, linkModel)
   const template = []
     const hasSelection = Boolean(params.selectionText?.trim())
     const hasImage = params.mediaType === 'image' && Boolean(params.srcURL)
-    const hasLink = Boolean(params.linkURL) && !contextFileModel
+    const hasLink = Boolean(ordinaryLinkModel)
     const isEditable = Boolean(params.isEditable)
 
     if (hasImage) {
@@ -5667,9 +5736,10 @@ async function showContextMenu(window, params) {
         ...contextFileModel.items.map(item => ({
           label: item.label,
           click: () => {
-            void runContextFileAction(item.id, contextFileModel, contextFileActionDependencies()).catch(() =>
+            void runContextFileAction(item.id, contextFileModel, contextFileActionDependencies()).catch(error => {
               rememberLog(`Context file action failed: ${item.id}`)
-            )
+              dialog.showErrorBox('Hermes', contextFileActionErrorMessage(item.id, error))
+            })
           }
         }))
       )
@@ -5742,12 +5812,22 @@ async function showContextMenu(window, params) {
       return
     }
 
+  // A newer right-click landed while this menu was being built; showing it now
+  // would target the previous element.
+  if (!isCurrent()) {
+    return
+  }
+
   Menu.buildFromTemplate(template).popup({ window })
 }
 
 function installContextMenu(window) {
+  const sequencer = createContextMenuSequencer()
+
   window.webContents.on('context-menu', (_event, params) => {
-    void showContextMenu(window, params).catch(() => rememberLog('Context menu build failed'))
+    void sequencer
+      .run(isCurrent => showContextMenu(window, params, isCurrent))
+      .catch(() => rememberLog('Context menu build failed'))
   })
 }
 

@@ -220,6 +220,12 @@ export function localPreviewTarget(rawTarget: string, cwd?: string | null): Prev
   }
 }
 
+export function previewContextFileSource(rawTarget: string, cwd?: string | null): string {
+  const target = localPreviewTarget(rawTarget, cwd)
+
+  return target?.kind === 'file' ? target.path || target.source : target?.url || rawTarget
+}
+
 async function enrichPreviewTarget(target: PreviewTarget | null): Promise<PreviewTarget | null> {
   if (
     !isDesktopFsRemoteMode() ||

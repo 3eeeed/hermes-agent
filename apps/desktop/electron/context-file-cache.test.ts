@@ -10,6 +10,7 @@ import { afterEach, test } from 'vitest'
 import {
   materializeLocalContextFile,
   materializeRemoteContextFile,
+  pruneContextFileCache,
   safeContextFilename
 } from './context-file-cache'
 
@@ -68,6 +69,140 @@ test('rejects non-HTTP sources before writing to the cache', async () => {
   assert.deepEqual(fs.readdirSync(cacheRoot), [])
 })
 
+test('uses a non-secret cache identity and an injected trusted downloader', async () => {
+  const cacheRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-context-file-'))
+  cleanupPaths.push(cacheRoot)
+  let calls = 0
+
+  const cached = await materializeRemoteContextFile({
+    cacheKey: 'gateway:remote-work:/srv/private.pdf',
+    cacheRoot,
+    fetchImpl: async () => {
+      calls += 1
+
+      return new Response('trusted gateway bytes', { status: 200 })
+    },
+    maxBytes: 1024,
+    suggestedFilename: 'private.pdf',
+    url: 'https://gateway.invalid/api/files/download?path=%2Fsrv%2Fprivate.pdf'
+  })
+
+  const expectedKey = (await import('node:crypto'))
+    .createHash('sha256')
+    .update('gateway:remote-work:/srv/private.pdf')
+    .digest('hex')
+
+  assert.equal(path.basename(path.dirname(cached)), expectedKey)
+  assert.equal(calls, 1)
+})
+
+test('writes cached gateway content with private directory and file permissions', async () => {
+  const { url } = await serve((_request, response) => response.end('private content'))
+  const cacheRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-context-file-'))
+  cleanupPaths.push(cacheRoot)
+
+  const cached = await materializeRemoteContextFile({
+    cacheRoot,
+    maxBytes: 1024,
+    suggestedFilename: 'private.txt',
+    url: `${url}/private.txt`
+  })
+
+  assert.equal(fs.statSync(path.dirname(cached)).mode & 0o777, 0o700)
+  assert.equal(fs.statSync(cached).mode & 0o777, 0o600)
+})
+
+test('refreshes a cached file after its freshness window expires', async () => {
+  let requests = 0
+
+  const { url } = await serve((_request, response) => {
+    requests += 1
+    response.end(`version-${requests}`)
+  })
+
+  const cacheRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-context-file-'))
+  cleanupPaths.push(cacheRoot)
+
+  const options = {
+    cacheMaxAgeMs: 100,
+    cacheRoot,
+    maxBytes: 1024,
+    suggestedFilename: 'changing.txt',
+    url: `${url}/changing.txt`
+  }
+
+  const cached = await materializeRemoteContextFile(options)
+  const stale = new Date(Date.now() - 1_000)
+  fs.utimesSync(cached, stale, stale)
+  const refreshed = await materializeRemoteContextFile(options)
+
+  assert.equal(refreshed, cached)
+  assert.equal(requests, 2)
+  assert.equal(fs.readFileSync(refreshed, 'utf8'), 'version-2')
+})
+
+test('removes abandoned partial downloads after the retention window', async () => {
+  const cacheRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-context-file-'))
+  cleanupPaths.push(cacheRoot)
+  const cacheDir = path.join(cacheRoot, 'abandoned')
+  fs.mkdirSync(cacheDir)
+  const partial = path.join(cacheDir, '.report.pdf.deadbeef.part')
+  fs.writeFileSync(partial, 'partial')
+  const stale = new Date(Date.now() - 1_000)
+  fs.utimesSync(partial, stale, stale)
+
+  await pruneContextFileCache(cacheRoot, { maxBytes: 1024, retentionMs: 100 })
+
+  assert.equal(fs.existsSync(partial), false)
+})
+
+test('keeps the cache within its byte budget after concurrent downloads publish', async () => {
+  const payload = Buffer.alloc(400, 0x41)
+  const { url } = await serve((_request, response) => response.end(payload))
+  const cacheRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-context-file-'))
+  cleanupPaths.push(cacheRoot)
+
+  await Promise.all(
+    ['a', 'b', 'c', 'd'].map(name =>
+      materializeRemoteContextFile({
+        cacheMaxBytes: 900,
+        cacheRoot,
+        maxBytes: 1024,
+        suggestedFilename: `${name}.bin`,
+        url: `${url}/${name}.bin`
+      })
+    )
+  )
+
+  const total = fs
+    .readdirSync(cacheRoot, { recursive: true })
+    .map(entry => path.join(cacheRoot, String(entry)))
+    .filter(entry => fs.statSync(entry).isFile())
+    .reduce((sum, entry) => sum + fs.statSync(entry).size, 0)
+
+  assert.ok(total <= 900, `cache grew to ${total} bytes, above the 900 byte budget`)
+})
+
+test('prunes the oldest cached file when the cache exceeds its byte budget', async () => {
+  const cacheRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-context-file-'))
+  cleanupPaths.push(cacheRoot)
+  const olderDir = path.join(cacheRoot, 'older')
+  const newerDir = path.join(cacheRoot, 'newer')
+  fs.mkdirSync(olderDir)
+  fs.mkdirSync(newerDir)
+  const older = path.join(olderDir, 'older.bin')
+  const newer = path.join(newerDir, 'newer.bin')
+  fs.writeFileSync(older, Buffer.alloc(600))
+  fs.writeFileSync(newer, Buffer.alloc(600))
+  const oldTime = new Date(Date.now() - 60_000)
+  fs.utimesSync(older, oldTime, oldTime)
+
+  await pruneContextFileCache(cacheRoot, { maxBytes: 700, retentionMs: 86_400_000 })
+
+  assert.equal(fs.existsSync(older), false)
+  assert.equal(fs.existsSync(newer), true)
+})
+
 test('materializes a remote file once and reuses the cached copy', async () => {
   let requests = 0
   const payload = Buffer.from('factory review package')
@@ -103,6 +238,34 @@ test('materializes a remote file once and reuses the cached copy', async () => {
   assert.equal(requests, 1)
   assert.ok(path.resolve(first).startsWith(`${path.resolve(cacheRoot)}${path.sep}`))
   assert.deepEqual(fs.readFileSync(first), payload)
+})
+
+test('coalesces concurrent writes by destination even when request options differ', async () => {
+  let requests = 0
+
+  const { url } = await serve((_request, response) => {
+    requests += 1
+    setTimeout(() => response.end('shared destination'), 20)
+  })
+
+  const cacheRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-context-file-'))
+  cleanupPaths.push(cacheRoot)
+
+  const base = {
+    cacheKey: 'gateway:remote-work:/srv/shared.zip',
+    cacheRoot,
+    maxBytes: 1024,
+    suggestedFilename: 'shared.zip',
+    url: `${url}/shared.zip`
+  }
+
+  const [first, second] = await Promise.all([
+    materializeRemoteContextFile({ ...base, timeoutMs: 1_000 }),
+    materializeRemoteContextFile({ ...base, timeoutMs: 2_000 })
+  ])
+
+  assert.equal(first, second)
+  assert.equal(requests, 1)
 })
 
 test('coalesces concurrent requests for the same remote file', async () => {
