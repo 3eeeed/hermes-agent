@@ -4219,6 +4219,13 @@ export const zhOverrides = {
   },
 
   contextMenu: {
+    file: {
+      openFile: '打开文件',
+      copyLink: '复制链接',
+      copyPath: '复制路径',
+      copyFile: '复制文件',
+      actionFailed: '文件操作未完成。'
+    },
     link: {
       openInApp: '在应用内浏览器中打开',
       openExternal: '在外部浏览器中打开',

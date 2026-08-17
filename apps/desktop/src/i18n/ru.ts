@@ -3462,6 +3462,13 @@ export const ruOverrides = {
     tabActions: title => `Действия: ${title}`
   },
   contextMenu: {
+    file: {
+      openFile: 'Открыть файл',
+      copyLink: 'Копировать ссылку',
+      copyPath: 'Копировать путь',
+      copyFile: 'Копировать файл',
+      actionFailed: 'Не удалось выполнить действие с файлом.'
+    },
     link: {
       openInApp: 'Открыть во встроенном браузере',
       openExternal: 'Открыть во внешнем браузере',

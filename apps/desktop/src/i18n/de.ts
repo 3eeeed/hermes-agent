@@ -4804,6 +4804,13 @@ export const deOverrides = {
     tabActions: title => `Aktionen für ${title}`
   },
   contextMenu: {
+    file: {
+      openFile: 'Datei öffnen',
+      copyLink: 'Link kopieren',
+      copyPath: 'Pfad kopieren',
+      copyFile: 'Datei kopieren',
+      actionFailed: 'Diese Dateiaktion wurde nicht abgeschlossen.'
+    },
     link: {
       openInApp: 'Im In-App-Browser öffnen',
       openExternal: 'Im externen Browser öffnen',

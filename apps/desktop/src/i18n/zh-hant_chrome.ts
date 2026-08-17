@@ -516,6 +516,13 @@ export const zhHantChrome = {
   },
 
   contextMenu: {
+    file: {
+      openFile: '開啟檔案',
+      copyLink: '複製連結',
+      copyPath: '複製路徑',
+      copyFile: '複製檔案',
+      actionFailed: '檔案操作未完成。'
+    },
     link: {
       openInApp: '在應用程式內瀏覽器中開啟',
       openExternal: '在外部瀏覽器中開啟',

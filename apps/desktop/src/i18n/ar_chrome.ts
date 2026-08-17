@@ -567,6 +567,13 @@ export const arChrome = {
     tabActions: title => `إجراءات ${title}`
   },
   contextMenu: {
+    file: {
+      openFile: 'فتح الملف',
+      copyLink: 'نسخ الرابط',
+      copyPath: 'نسخ المسار',
+      copyFile: 'نسخ الملف',
+      actionFailed: 'تعذّر إكمال إجراء الملف.'
+    },
     link: {
       openInApp: 'فتح في متصفح التطبيق',
       openExternal: 'فتح في المتصفح الخارجي',

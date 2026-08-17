@@ -4387,6 +4387,13 @@ export const en: Translations = {
   },
 
   contextMenu: {
+    file: {
+      openFile: 'Open file',
+      copyLink: 'Copy link',
+      copyPath: 'Copy path',
+      copyFile: 'Copy file',
+      actionFailed: 'That file action did not complete.'
+    },
     link: {
       openInApp: 'Open in in-app browser',
       openExternal: 'Open in external browser',

@@ -365,6 +365,13 @@ declare global {
       /** Copy the image under the LAST context-menu gesture (Chromium tracks
        *  its coordinates on the main-process context-menu event). */
       contextMenuCopyImage?: () => Promise<void>
+      /** Act on the chat file under the context menu (Open, Copy link/path/
+       *  file, Reveal). Main re-validates the descriptor before touching it. */
+      contextMenuFileAction?: (request: {
+        action: 'copy-file' | 'copy-link' | 'copy-path' | 'open-file' | 'reveal-file'
+        descriptor?: string
+        linkUrl?: string
+      }) => Promise<{ ok: true } | { message: string; ok: false }>
       /** Replace the misspelled word or add it to the dictionary. */
       contextMenuSpellcheck?: (action: { kind: 'add' | 'replace'; word: string }) => Promise<void>
       /** Add a word to the spell-check dictionary of a webview guest's

@@ -13,6 +13,9 @@ export interface ContextMenuDomTarget {
   /** Set only when the click landed in a composer: what the composer
    *  context-menu area may see and act on (see `composer-menu.ts`). */
   composer: ComposerMenuTarget | null
+  /** `data-hermes-context-file` of the chat file under the click (JSON text,
+   *  re-validated by main), or '' when the click is not on a chat file. */
+  contextFile: string
   /** The enclosing dialog content node, when the click landed inside one. */
   dialogPortalContainer: HTMLElement | null
   /** The clicked editable, when the click landed in one. */
@@ -50,9 +53,11 @@ export function resolveDomTarget(element: Element | null): ContextMenuDomTarget 
   const image = element?.closest('img')
   const linkUrl = anchor?.getAttribute('href')?.trim() ?? ''
   const editable = editableFrom(element)
+  const contextFile = element?.closest('[data-hermes-context-file]')?.getAttribute('data-hermes-context-file') ?? ''
 
   return {
     composer: captureComposerMenuTarget(editable),
+    contextFile,
     dialogPortalContainer: dialogContent instanceof HTMLElement ? dialogContent : null,
     editable,
     // A placeholder anchor is not a link the menu can act on.
@@ -66,4 +71,10 @@ export function resolveDomTarget(element: Element | null): ContextMenuDomTarget 
 /** True when `url` is something the in-app browser can render. */
 export function isWebUrl(url: string): boolean {
   return /^https?:\/\//i.test(url)
+}
+
+/** True when `url` names a file rather than a page: the menu offers file
+ *  actions for it instead of browser verbs. */
+export function isFileUrl(url: string): boolean {
+  return /^file:/i.test(url)
 }

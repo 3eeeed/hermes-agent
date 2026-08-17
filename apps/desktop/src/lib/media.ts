@@ -10,6 +10,13 @@ import { capitalize } from '@/lib/text'
 import { notify, notifyError } from '@/store/notifications'
 import { $connection } from '@/store/session'
 
+export interface MediaContextFileDescriptor {
+  downloadUrl?: string
+  name: string
+  remote: boolean
+  source: string
+}
+
 export type MediaKind = 'audio' | 'image' | 'video' | 'file'
 
 interface MediaInfo {
@@ -314,6 +321,24 @@ export function mediaGatewayStreamUrl(path: string): string {
   }
 
   return mediaExternalUrl(path)
+}
+
+export function mediaContextFileDescriptor(path: string): MediaContextFileDescriptor {
+  const downloadUrl = mediaExternalUrl(path)
+  const remote = /^https?:\/\//i.test(downloadUrl)
+
+  return {
+    source: path,
+    name: mediaName(path),
+    remote,
+    ...(remote ? { downloadUrl } : {})
+  }
+}
+
+/** The `data-hermes-context-file` attribute a chat file element carries: the
+ *  context menu reads it to offer Open / Copy / Reveal for that file. */
+export function mediaContextFileAttr(path: string): string | undefined {
+  return path ? JSON.stringify(mediaContextFileDescriptor(path)) : undefined
 }
 
 // Custom Electron scheme (registered in electron/main.ts) that streams a local

@@ -30,6 +30,7 @@ import { isBrowserOwnedTouch } from '@/lib/touch-interaction'
 import { openPreview } from '@/store/preview'
 
 import { type ComposerMenuRow, type ComposerMenuTarget, resolveComposerMenuSections } from './composer-menu'
+import { contextFileRequest, fileMenuSection } from './file-menu-items'
 import { ShellMenuItems } from './shell-menu-items'
 import {
   $contextMenu,
@@ -289,7 +290,17 @@ function domSections(
     withEditableFocus(() => void window.hermesDesktop?.contextMenuSpellcheck?.(action))
   }
 
-  if (linkUrl) {
+  // A chat file (attachment, inline media, `file:` link) gets the file verbs
+  // in place of the browser link verbs, which cannot open a local path.
+  const fileSection = fileMenuSection(target, t, (spec, onSelect) => (
+    <Item icon={spec.icon} key={`file-${spec.action}`} label={spec.label} onSelect={onSelect} />
+  ))
+
+  if (fileSection) {
+    sections.push(fileSection)
+  }
+
+  if (linkUrl && !(fileSection && !linkIsWeb)) {
     sections.push(
       [
         linkIsWeb && openInApp ? (
@@ -736,7 +747,7 @@ export function AppContextMenu() {
         )
       )
 
-      const owned = Boolean(target.linkUrl || target.onImage || target.editable || selected)
+      const owned = Boolean(target.linkUrl || target.onImage || target.editable || contextFileRequest(target) || selected)
 
       if (leaveEditableToBrowser(event, target)) {
         return

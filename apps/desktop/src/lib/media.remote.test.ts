@@ -8,6 +8,7 @@ import {
   gatewayImageProxyDataUrl,
   gatewayMediaDataUrl,
   isInlineMediaSrc,
+  mediaContextFileDescriptor,
   mediaExternalUrl,
   mediaGatewayStreamUrl,
   resolveMediaDisplaySrc,
@@ -161,6 +162,23 @@ describe('mediaGatewayStreamUrl', () => {
     expect(mediaGatewayStreamUrl('/tmp/a.mp4')).toBe(
       'hermes-media://remote/%2Ftmp%2Fa.mp4?connectionId=studio-ssh&profile=voice%20reviewer'
     )
+  })
+})
+
+describe('mediaContextFileDescriptor', () => {
+  afterEach(() => {
+    $connection.set(null)
+  })
+
+  it('keeps the original source separate from the authenticated download URL', () => {
+    $connection.set({ mode: 'remote', baseUrl: 'https://gw', token: 's e/cret' } as never)
+
+    expect(mediaContextFileDescriptor('/tmp/factory review.pdf')).toEqual({
+      downloadUrl: 'https://gw/api/files/download?path=%2Ftmp%2Ffactory%20review.pdf&token=s%20e%2Fcret',
+      name: 'factory review.pdf',
+      remote: true,
+      source: '/tmp/factory review.pdf'
+    })
   })
 })
 

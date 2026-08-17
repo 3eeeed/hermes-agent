@@ -3842,6 +3842,14 @@ export interface Translations extends NoticeTranslations {
   }
 
   contextMenu: {
+    /** A chat file's actions (attachment, inline media, file link). */
+    file: {
+      openFile: string
+      copyLink: string
+      copyPath: string
+      copyFile: string
+      actionFailed: string
+    }
     link: {
       openInApp: string
       openExternal: string

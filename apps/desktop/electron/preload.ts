@@ -373,6 +373,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   saveImageFromUrl: url => ipcRenderer.invoke('hermes:saveImageFromUrl', url),
   contextMenuEdit: command => ipcRenderer.invoke('hermes:context-menu:edit', command),
   contextMenuCopyImage: () => ipcRenderer.invoke('hermes:context-menu:copy-image'),
+  contextMenuFileAction: request => ipcRenderer.invoke('hermes:context-menu:file-action', request),
   contextMenuSpellcheck: action => ipcRenderer.invoke('hermes:context-menu:spellcheck', action),
   contextMenuGuestAddWord: payload => ipcRenderer.invoke('hermes:context-menu:guest-add-word', payload),
   spellcheckDictionary: (op, word) => ipcRenderer.invoke('hermes:spellcheck:dictionary', { op, word }),

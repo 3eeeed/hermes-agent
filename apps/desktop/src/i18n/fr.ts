@@ -4815,6 +4815,13 @@ export const frOverrides = {
     tabActions: title => `Actions pour ${title}`
   },
   contextMenu: {
+    file: {
+      openFile: 'Ouvrir le fichier',
+      copyLink: 'Copier le lien',
+      copyPath: 'Copier le chemin',
+      copyFile: 'Copier le fichier',
+      actionFailed: 'Cette action sur le fichier n’a pas abouti.'
+    },
     link: {
       openInApp: 'Ouvrir dans le navigateur intégré',
       openExternal: 'Ouvrir dans le navigateur externe',

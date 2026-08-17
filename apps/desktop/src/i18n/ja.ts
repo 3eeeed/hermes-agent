@@ -3215,6 +3215,13 @@ export const jaOverrides = {
   },
 
   contextMenu: {
+    file: {
+      openFile: 'ファイルを開く',
+      copyLink: 'リンクをコピー',
+      copyPath: 'パスをコピー',
+      copyFile: 'ファイルをコピー',
+      actionFailed: 'ファイル操作を完了できませんでした。'
+    },
     link: {
       openInApp: 'アプリ内ブラウザーで開く',
       openExternal: '外部ブラウザーで開く',

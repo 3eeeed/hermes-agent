@@ -42,6 +42,7 @@ import {
   isFileMediaPath,
   isMarkdownDocumentPath,
   isRemoteGateway,
+  mediaContextFileAttr,
   mediaExternalUrl,
   mediaKind,
   mediaName,
@@ -186,7 +187,10 @@ function MediaPlaybackAttachment({ path }: { path: string }) {
 
   if (kind === 'audio' && src) {
     return (
-      <span className="my-3 block max-w-md rounded-xl border border-(--ui-stroke-tertiary) bg-muted/35 p-3">
+      <span
+        className="my-3 block max-w-md rounded-xl border border-(--ui-stroke-tertiary) bg-muted/35 p-3"
+        data-hermes-context-file={mediaContextFileAttr(path)}
+      >
         <span className="mb-2 block truncate text-xs font-medium text-muted-foreground">{name}</span>
         <audio
           className="block w-full"
@@ -203,7 +207,10 @@ function MediaPlaybackAttachment({ path }: { path: string }) {
 
   if (kind === 'video' && src) {
     return (
-      <span className="my-3 block max-w-2xl rounded-xl border border-(--ui-stroke-tertiary) bg-muted/35 p-3">
+      <span
+        className="my-3 block max-w-2xl rounded-xl border border-(--ui-stroke-tertiary) bg-muted/35 p-3"
+        data-hermes-context-file={mediaContextFileAttr(path)}
+      >
         <span className="mb-2 block truncate text-xs font-medium text-muted-foreground">{name}</span>
         <TranscriptVideo
           className="block max-h-112 w-full rounded-lg bg-black"
@@ -218,7 +225,7 @@ function MediaPlaybackAttachment({ path }: { path: string }) {
   }
 
   return (
-    <span className="wrap-anywhere">
+    <span className="wrap-anywhere" data-hermes-context-file={mediaContextFileAttr(path)}>
       <a
         className="ref wrap-anywhere"
         href="#"
@@ -418,7 +425,11 @@ function MarkdownImageContent({
   // frame. The one-time shift on error is the lesser cost.
   if (image.failed) {
     return (
-      <span className="my-2 block text-sm text-muted-foreground" data-slot="aui_markdown-image">
+      <span
+        className="my-2 block text-sm text-muted-foreground"
+        data-hermes-context-file={mediaContextFileAttr(rawSrc)}
+        data-slot="aui_markdown-image"
+      >
         Couldn&apos;t load {name}.{' '}
         <button className="ref font-medium text-foreground" onClick={open} type="button">
           Open image
@@ -435,7 +446,12 @@ function MarkdownImageContent({
   const framed = Boolean(image.frameStyle)
 
   return (
-    <span className="relative my-2 block max-w-full" data-slot="aui_markdown-image" style={image.frameStyle}>
+    <span
+      className="relative my-2 block max-w-full"
+      data-hermes-context-file={mediaContextFileAttr(rawSrc)}
+      data-slot="aui_markdown-image"
+      style={image.frameStyle}
+    >
       {image.src ? (
         <ZoomableImage
           {...props}
