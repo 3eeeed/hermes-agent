@@ -2,6 +2,13 @@ import { readDesktopFileDataUrl } from '@/lib/desktop-fs'
 import { capitalize } from '@/lib/text'
 import { $connection } from '@/store/session'
 
+export interface MediaContextFileDescriptor {
+  downloadUrl?: string
+  name: string
+  remote: boolean
+  source: string
+}
+
 export type MediaKind = 'audio' | 'image' | 'video' | 'file'
 
 interface MediaInfo {
@@ -117,6 +124,18 @@ export function mediaExternalUrl(path: string): string {
   }
 
   return /^file:/i.test(path) ? path : `file://${path}`
+}
+
+export function mediaContextFileDescriptor(path: string): MediaContextFileDescriptor {
+  const downloadUrl = mediaExternalUrl(path)
+  const remote = /^https?:\/\//i.test(downloadUrl)
+
+  return {
+    source: path,
+    name: mediaName(path),
+    remote,
+    ...(remote ? { downloadUrl } : {})
+  }
 }
 
 // Custom Electron scheme (registered in electron/main.ts) that streams a local

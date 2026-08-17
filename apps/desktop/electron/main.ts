@@ -81,6 +81,8 @@ import {
   savedProfileSsh,
   tokenPreview
 } from './connection-config'
+import { runContextFileAction } from './context-file-actions'
+import { materializeLocalContextFile, materializeRemoteContextFile } from './context-file-cache'
 import { describeCrashReason, installCrashForensics } from './crash-forensics'
 import { adoptServedDashboardToken } from './dashboard-token'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
@@ -96,6 +98,7 @@ import {
 import { describeDevCdpDecision, resolveDevCdpPort } from './dev-cdp'
 import { installEmbedReferer } from './embed-referer'
 import { createEventDeduper } from './event-dedupe'
+import { contextMenuModelForContextFile, contextMenuModelForLink } from './file-link-context-menu'
 import { findGitBash as _findGitBash } from './find-git-bash'
 import { installFoundInPageForwarder, performFind, stopFind } from './find-in-page'
 import { createFirstRunSetupGate } from './first-run-setup-gate'
@@ -160,6 +163,7 @@ import {
   resolveOauthRestAuth,
   resolveReadinessProbeAuth
 } from './native-auth-decisions'
+import { copyFileToClipboard } from './native-file-clipboard'
 import {
   nativeRefreshUrl,
   type NativeTokenSet,
@@ -5532,12 +5536,96 @@ function installZoomShortcuts(window) {
   })
 }
 
-function installContextMenu(window) {
-  window.webContents.on('context-menu', (_event, params) => {
-    const template = []
+const CONTEXT_FILE_CACHE_MAX_BYTES = 536_870_912
+const CONTEXT_FILE_DOWNLOAD_TIMEOUT_MS = 120_000
+const CONTEXT_FILE_CLIPBOARD_COMMAND_TIMEOUT_MS = 15_000
+
+async function contextFileDescriptorAtPoint(window, params) {
+  const x = Math.max(0, Math.round(Number(params.x) || 0))
+  const y = Math.max(0, Math.round(Number(params.y) || 0))
+
+  const script = `(() => {
+    const node = document.elementFromPoint(${x}, ${y})
+    if (!(node instanceof Element)) return null
+    return node.closest('[data-hermes-context-file]')?.getAttribute('data-hermes-context-file') ?? null
+  })()`
+
+  const value = await window.webContents.executeJavaScript(script)
+
+  return typeof value === 'string' ? value : null
+}
+
+function runContextFileClipboardCommand(command, args) {
+  return new Promise<void>((resolve, reject) => {
+    execFile(
+      command,
+      args,
+      { timeout: CONTEXT_FILE_CLIPBOARD_COMMAND_TIMEOUT_MS, windowsHide: true },
+      error => (error ? reject(error) : resolve())
+    )
+  })
+}
+
+async function materializeContextMenuFile(model) {
+  if (model.kind === 'remote-file') {
+    if (!model.downloadUrl) {
+      throw new Error('Remote context file is missing a download URL')
+    }
+
+    return materializeRemoteContextFile({
+      cacheRoot: path.join(app.getPath('temp'), 'hermes-context-files'),
+      maxBytes: CONTEXT_FILE_CACHE_MAX_BYTES,
+      suggestedFilename: model.name,
+      timeoutMs: CONTEXT_FILE_DOWNLOAD_TIMEOUT_MS,
+      url: model.downloadUrl
+    })
+  }
+
+  return materializeLocalContextFile(model.source)
+}
+
+function contextFileActionDependencies() {
+  return {
+    copyFile: filePath =>
+      copyFileToClipboard(
+        filePath,
+        process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux',
+        {
+          runCommand: runContextFileClipboardCommand,
+          writeBuffer: (format, data) => clipboard.writeBuffer(format, data)
+        },
+        { desktop: process.env.XDG_CURRENT_DESKTOP }
+      ),
+    copyText: value => clipboard.writeText(value),
+    materialize: materializeContextMenuFile,
+    openFile: async filePath => {
+      const failure = await shell.openPath(filePath)
+
+      if (failure) {
+        throw new Error(failure)
+      }
+    },
+    revealFile: filePath => shell.showItemInFolder(filePath)
+  }
+}
+
+async function showContextMenu(window, params) {
+  const rawDescriptor = await contextFileDescriptorAtPoint(window, params)
+  const platform = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
+  const descriptorModel = rawDescriptor ? contextMenuModelForContextFile(rawDescriptor, platform) : null
+
+  const linkModel = params.linkURL
+    ? contextMenuModelForLink(
+        { linkURL: params.linkURL, suggestedFilename: params.suggestedFilename || '' },
+        platform
+      )
+    : null
+
+  const contextFileModel = descriptorModel ?? (linkModel?.kind === 'web-link' ? null : linkModel)
+  const template = []
     const hasSelection = Boolean(params.selectionText?.trim())
     const hasImage = params.mediaType === 'image' && Boolean(params.srcURL)
-    const hasLink = Boolean(params.linkURL)
+    const hasLink = Boolean(params.linkURL) && !contextFileModel
     const isEditable = Boolean(params.isEditable)
 
     if (hasImage) {
@@ -5567,6 +5655,23 @@ function installContextMenu(window) {
             void saveImageFromUrl(params.srcURL).catch(error => rememberLog(`Save image failed: ${error.message}`))
           }
         }
+      )
+    }
+
+    if (contextFileModel) {
+      if (template.length) {
+        template.push({ type: 'separator' })
+      }
+
+      template.push(
+        ...contextFileModel.items.map(item => ({
+          label: item.label,
+          click: () => {
+            void runContextFileAction(item.id, contextFileModel, contextFileActionDependencies()).catch(() =>
+              rememberLog(`Context file action failed: ${item.id}`)
+            )
+          }
+        }))
       )
     }
 
@@ -5637,7 +5742,12 @@ function installContextMenu(window) {
       return
     }
 
-    Menu.buildFromTemplate(template).popup({ window })
+  Menu.buildFromTemplate(template).popup({ window })
+}
+
+function installContextMenu(window) {
+  window.webContents.on('context-menu', (_event, params) => {
+    void showContextMenu(window, params).catch(() => rememberLog('Context menu build failed'))
   })
 }
 

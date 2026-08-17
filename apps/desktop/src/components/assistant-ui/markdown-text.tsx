@@ -23,8 +23,10 @@ import {
   downloadGatewayMediaFile,
   isInlineMediaSrc,
   isRemoteGateway,
+  mediaContextFileDescriptor,
   mediaExternalUrl,
   mediaKind,
+  mediaMarkdownHref,
   mediaName,
   mediaPathFromMarkdownHref,
   resolveMediaDisplaySrc,
@@ -190,14 +192,21 @@ function MediaAttachment({ path }: { path: string }) {
   if (kind === 'image' && src) {
     return (
       <span className="block">
-        <MarkdownImage alt={name} src={src} />
+        <MarkdownImage
+          alt={name}
+          data-hermes-context-file={JSON.stringify(mediaContextFileDescriptor(path))}
+          src={src}
+        />
       </span>
     )
   }
 
   if (kind === 'audio' && src) {
     return (
-      <span className="my-3 block max-w-md rounded-xl border border-(--ui-stroke-tertiary) bg-muted/35 p-3">
+      <span
+        className="my-3 block max-w-md rounded-xl border border-(--ui-stroke-tertiary) bg-muted/35 p-3"
+        data-hermes-context-file={JSON.stringify(mediaContextFileDescriptor(path))}
+      >
         <span className="mb-2 block truncate text-xs font-medium text-muted-foreground">{name}</span>
         <audio className="block w-full" controls onError={() => setFailed(true)} preload="metadata" src={src} />
         {failed && <OpenMediaButton kind="audio" path={path} />}
@@ -207,7 +216,10 @@ function MediaAttachment({ path }: { path: string }) {
 
   if (kind === 'video' && src) {
     return (
-      <span className="my-3 block max-w-2xl rounded-xl border border-(--ui-stroke-tertiary) bg-muted/35 p-3">
+      <span
+        className="my-3 block max-w-2xl rounded-xl border border-(--ui-stroke-tertiary) bg-muted/35 p-3"
+        data-hermes-context-file={JSON.stringify(mediaContextFileDescriptor(path))}
+      >
         <span className="mb-2 block truncate text-xs font-medium text-muted-foreground">{name}</span>
         <video
           className="block max-h-112 w-full rounded-lg bg-black"
@@ -221,10 +233,10 @@ function MediaAttachment({ path }: { path: string }) {
   }
 
   return (
-    <span className="wrap-anywhere">
+    <span className="wrap-anywhere" data-hermes-context-file={JSON.stringify(mediaContextFileDescriptor(path))}>
       <a
         className="ref wrap-anywhere"
-        href="#"
+        href={mediaMarkdownHref(path)}
         onClick={event => {
           event.preventDefault()
           open()
@@ -393,6 +405,7 @@ function MarkdownImageContent({ className, src, alt, ...props }: ComponentProps<
         className
       )}
       containerClassName="my-2 block w-fit max-w-[min(100%,var(--image-preview-max-width))]"
+      data-hermes-context-file={JSON.stringify(mediaContextFileDescriptor(rawSrc))}
       slot="aui_markdown-image"
       src={resolvedSrc}
       {...props}

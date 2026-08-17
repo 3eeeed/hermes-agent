@@ -10,6 +10,7 @@ import {
   gatewayMediaDataUrl,
   isInlineMediaSrc,
   isRemoteGateway,
+  mediaContextFileDescriptor,
   mediaExternalUrl,
   resolveMediaDisplaySrc,
   resolveMediaPlaybackSrc
@@ -75,6 +76,17 @@ describe('mediaExternalUrl', () => {
   it('falls back to file:// when remote connection lacks a token', () => {
     $connection.set({ mode: 'remote', baseUrl: 'https://gw' } as never)
     expect(mediaExternalUrl('/tmp/a.png')).toBe('file:///tmp/a.png')
+  })
+
+  it('keeps the original source separate from the authenticated download URL', () => {
+    $connection.set({ mode: 'remote', baseUrl: 'https://gw', token: 's e/cret' } as never)
+
+    expect(mediaContextFileDescriptor('/tmp/factory review.pdf')).toEqual({
+      downloadUrl: 'https://gw/api/files/download?path=%2Ftmp%2Ffactory%20review.pdf&token=s%20e%2Fcret',
+      name: 'factory review.pdf',
+      remote: true,
+      source: '/tmp/factory review.pdf'
+    })
   })
 })
 
