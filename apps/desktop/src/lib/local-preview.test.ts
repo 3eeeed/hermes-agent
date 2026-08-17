@@ -14,6 +14,7 @@ import {
   normalizeOrLocalPreviewTarget,
   openPreviewTargetInBrowser,
   pathToFileUrl,
+  previewContextFileSource,
   remoteHtmlPreviewDocument,
   validatedRemoteHtmlDataUrl
 } from './local-preview'
@@ -269,6 +270,12 @@ describe('preview path resolution', () => {
     await expect(normalizeOrLocalPreviewTarget('source.py', cwd)).resolves.toMatchObject({
       path: 'C:/work tree/source.py'
     })
+  })
+})
+
+describe('preview context files', () => {
+  it('resolves relative attachment paths against the transcript session cwd', () => {
+    expect(previewContextFileSource('reports/factory.pdf', '/srv/project')).toBe('/srv/project/reports/factory.pdf')
   })
 })
 

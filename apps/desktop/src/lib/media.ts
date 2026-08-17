@@ -10,10 +10,15 @@ import { capitalize } from '@/lib/text'
 import { notify, notifyError } from '@/store/notifications'
 import { $connection } from '@/store/session'
 
+/** What a chat file element tells the context menu about itself. It names
+ *  the file and who owns it — never a credentialed URL: main resolves the
+ *  owning gateway and its auth itself. */
 export interface MediaContextFileDescriptor {
-  downloadUrl?: string
+  /** Registered gateway connection that owns a `gateway` file. */
+  connectionId?: string
+  kind: 'external' | 'gateway' | 'local'
   name: string
-  remote: boolean
+  profile?: string
   source: string
 }
 
@@ -330,14 +335,15 @@ export function mediaContextFileDescriptor(path: string): MediaContextFileDescri
     return null
   }
 
-  const downloadUrl = mediaExternalUrl(path)
-  const remote = /^https?:\/\//i.test(downloadUrl)
+  const connection = $connection.get()
+  const kind = /^https?:\/\//i.test(path) ? 'external' : isRemoteGateway() ? 'gateway' : 'local'
 
   return {
+    kind,
     source: path,
     name: mediaName(path),
-    remote,
-    ...(remote ? { downloadUrl } : {})
+    ...(kind === 'gateway' && connection?.connectionId ? { connectionId: connection.connectionId } : {}),
+    ...(kind === 'gateway' && connection?.profile ? { profile: connection.profile } : {})
   }
 }
 

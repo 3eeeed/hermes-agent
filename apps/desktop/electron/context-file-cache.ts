@@ -6,11 +6,134 @@ import { fileURLToPath } from 'node:url'
 import { resolveReadableFileForIpc } from './hardening'
 
 export interface MaterializeRemoteContextFileOptions {
+  cacheKey?: string
+  cacheMaxAgeMs?: number
+  cacheMaxBytes?: number
   cacheRoot: string
+  fetchImpl?: (input: string | URL, init?: RequestInit) => Promise<Response>
   maxBytes: number
   suggestedFilename?: string
   timeoutMs?: number
   url: string
+}
+
+export interface ContextFileCachePruneOptions {
+  keep?: string
+  maxBytes: number
+  retentionMs: number
+}
+
+interface CachedEntry {
+  mtimeMs: number
+  pathname: string
+  size: number
+}
+
+export async function pruneContextFileCache(
+  cacheRoot: string,
+  options: ContextFileCachePruneOptions
+): Promise<void> {
+  const root = path.resolve(cacheRoot)
+  const running = cachePrunes.get(root)
+
+  // Serialize pruning per cache root: concurrent sweeps race on the same
+  // entries and can each delete what the other just counted.
+  const pending = (running ?? Promise.resolve())
+    .catch(() => undefined)
+    .then(() => pruneContextFileCacheOnce(root, options))
+
+  cachePrunes.set(root, pending)
+
+  return pending.finally(() => {
+    if (cachePrunes.get(root) === pending) {
+      cachePrunes.delete(root)
+    }
+  })
+}
+
+const cachePrunes = new Map<string, Promise<void>>()
+
+async function pruneContextFileCacheOnce(
+  cacheRoot: string,
+  options: ContextFileCachePruneOptions
+): Promise<void> {
+  let directories: fs.Dirent[]
+
+  try {
+    directories = await fs.promises.readdir(cacheRoot, { withFileTypes: true })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return
+    }
+
+    throw error
+  }
+
+  const entries: CachedEntry[] = []
+  const now = Date.now()
+
+  for (const directory of directories) {
+    const directoryPath = path.join(cacheRoot, directory.name)
+
+    if (directory.isSymbolicLink() || !directory.isDirectory()) {
+      await fs.promises.rm(directoryPath, { force: true, recursive: directory.isDirectory() }).catch(() => undefined)
+
+      continue
+    }
+
+    const children = await fs.promises.readdir(directoryPath, { withFileTypes: true }).catch(() => [])
+
+    for (const child of children) {
+      const pathname = path.join(directoryPath, child.name)
+      const stat = await fs.promises.lstat(pathname).catch(() => null)
+
+      if (child.name.endsWith('.part')) {
+        if (stat && now - stat.mtimeMs > options.retentionMs) {
+          await fs.promises.unlink(pathname).catch(() => undefined)
+        }
+
+        continue
+      }
+
+      if (!stat || stat.isSymbolicLink() || !stat.isFile()) {
+        await fs.promises.rm(pathname, { force: true, recursive: Boolean(stat?.isDirectory()) }).catch(() => undefined)
+
+        continue
+      }
+
+      if (now - stat.mtimeMs > options.retentionMs) {
+        await fs.promises.unlink(pathname).catch(() => undefined)
+
+        continue
+      }
+
+      entries.push({ mtimeMs: stat.mtimeMs, pathname, size: stat.size })
+    }
+  }
+
+  let totalBytes = entries.reduce((total, entry) => total + entry.size, 0)
+  const keep = options.keep ? path.resolve(options.keep) : ''
+
+  for (const entry of entries.sort((left, right) => left.mtimeMs - right.mtimeMs)) {
+    if (totalBytes <= options.maxBytes) {
+      break
+    }
+
+    // Never evict the file the caller is about to hand to the clipboard or
+    // shell, even when it alone exceeds the budget.
+    if (keep && path.resolve(entry.pathname) === keep) {
+      continue
+    }
+
+    await fs.promises.unlink(entry.pathname).catch(() => undefined)
+    totalBytes -= entry.size
+  }
+
+  await Promise.all(
+    directories
+      .filter(directory => directory.isDirectory() && !directory.isSymbolicLink())
+      .map(directory => fs.promises.rmdir(path.join(cacheRoot, directory.name)).catch(() => undefined))
+  )
 }
 
 export function safeContextFilename(value: string | undefined): string {
@@ -28,14 +151,33 @@ export function safeContextFilename(value: string | undefined): string {
   return cleaned && cleaned !== '.' && cleaned !== '..' ? cleaned : 'download'
 }
 
-async function cachedFile(pathname: string): Promise<null | string> {
+async function cachedFile(pathname: string, maxAgeMs: number): Promise<null | string> {
   try {
-    const stat = await fs.promises.stat(pathname)
+    const stat = await fs.promises.lstat(pathname)
 
-    return stat.isFile() ? pathname : null
+    if (stat.isSymbolicLink() || !stat.isFile() || Date.now() - stat.mtimeMs > maxAgeMs) {
+      await fs.promises.unlink(pathname)
+
+      return null
+    }
+
+    await fs.promises.chmod(pathname, 0o600)
+
+    return pathname
   } catch {
     return null
   }
+}
+
+async function ensurePrivateDirectory(pathname: string): Promise<void> {
+  await fs.promises.mkdir(pathname, { mode: 0o700, recursive: true })
+  const stat = await fs.promises.lstat(pathname)
+
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error('Context file cache path must be a private directory')
+  }
+
+  await fs.promises.chmod(pathname, 0o700)
 }
 
 export async function materializeLocalContextFile(source: string): Promise<string> {
@@ -47,22 +189,37 @@ export async function materializeLocalContextFile(source: string): Promise<strin
 
 const remoteMaterializations = new Map<string, Promise<string>>()
 
-export function materializeRemoteContextFile(options: MaterializeRemoteContextFileOptions): Promise<string> {
-  const key = JSON.stringify([
-    path.resolve(options.cacheRoot),
-    options.url,
-    options.suggestedFilename || '',
-    options.maxBytes,
-    options.timeoutMs ?? 30_000
-  ])
+function remoteContextCachePlan(options: MaterializeRemoteContextFileOptions): {
+  cacheDir: string
+  destination: string
+  source: URL
+} {
+  const source = new URL(options.url)
 
+  if (!['http:', 'https:'].includes(source.protocol)) {
+    throw new Error('Remote context files must use HTTP or HTTPS')
+  }
+
+  const cacheKey = crypto
+    .createHash('sha256')
+    .update(options.cacheKey || source.toString())
+    .digest('hex')
+
+  const cacheDir = path.join(path.resolve(options.cacheRoot), cacheKey)
+  const destination = path.join(cacheDir, safeContextFilename(options.suggestedFilename || path.basename(source.pathname)))
+
+  return { cacheDir, destination, source }
+}
+
+/** One transfer per cache destination: concurrent requests share it. */
+function coalesced(key: string, start: () => Promise<string>): Promise<string> {
   const running = remoteMaterializations.get(key)
 
   if (running) {
     return running
   }
 
-  const pending = materializeRemoteContextFileOnce(options)
+  const pending = start()
   remoteMaterializations.set(key, pending)
 
   return pending.finally(() => {
@@ -72,36 +229,103 @@ export function materializeRemoteContextFile(options: MaterializeRemoteContextFi
   })
 }
 
-async function materializeRemoteContextFileOnce(options: MaterializeRemoteContextFileOptions): Promise<string> {
-  const source = new URL(options.url)
+export function materializeRemoteContextFile(options: MaterializeRemoteContextFileOptions): Promise<string> {
+  let key: string
 
-  if (!['http:', 'https:'].includes(source.protocol)) {
-    throw new Error('Remote context files must use HTTP or HTTPS')
+  try {
+    key = remoteContextCachePlan(options).destination
+  } catch (error) {
+    return Promise.reject(error)
   }
 
-  const cacheKey = crypto.createHash('sha256').update(source.toString()).digest('hex')
-  const cacheDir = path.join(options.cacheRoot, cacheKey)
-  const destination = path.join(cacheDir, safeContextFilename(options.suggestedFilename || path.basename(source.pathname)))
-  const existing = await cachedFile(destination)
+  return coalesced(key, () => materializeRemoteContextFileOnce(options))
+}
+
+export interface MaterializeDownloadedContextFileOptions {
+  cacheKey: string
+  cacheMaxAgeMs?: number
+  cacheMaxBytes?: number
+  cacheRoot: string
+  /** Write the file's bytes to `temporary` (a fresh path inside the private
+   *  cache directory). The cache publishes it only after this resolves. */
+  download: (temporary: string) => Promise<void>
+  maxBytes: number
+  suggestedFilename?: string
+}
+
+/** Cache a file some other transport fetches (a gateway download that owns its
+ *  own auth and routing) with the same privacy, freshness and budget rules as
+ *  a public download. */
+export function materializeDownloadedContextFile(options: MaterializeDownloadedContextFileOptions): Promise<string> {
+  const cacheDir = path.join(
+    path.resolve(options.cacheRoot),
+    crypto.createHash('sha256').update(options.cacheKey).digest('hex')
+  )
+
+  const destination = path.join(cacheDir, safeContextFilename(options.suggestedFilename))
+
+  return coalesced(destination, async () => {
+    await ensurePrivateDirectory(options.cacheRoot)
+    await ensurePrivateDirectory(cacheDir)
+    const existing = await cachedFile(destination, options.cacheMaxAgeMs ?? 300_000)
+
+    if (existing) {
+      return existing
+    }
+
+    const temporary = path.join(cacheDir, `.${path.basename(destination)}.${crypto.randomBytes(6).toString('hex')}.part`)
+
+    try {
+      await options.download(temporary)
+      const stat = await fs.promises.lstat(temporary)
+
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        throw new Error('Context file download did not produce a regular file')
+      }
+
+      if (stat.size > options.maxBytes) {
+        throw new Error(`Remote context file exceeds ${options.maxBytes} bytes`)
+      }
+
+      await fs.promises.chmod(temporary, 0o600)
+      await fs.promises.rename(temporary, destination)
+    } catch (error) {
+      await fs.promises.rm(temporary, { force: true }).catch(() => undefined)
+      throw error
+    }
+
+    await pruneContextFileCache(options.cacheRoot, {
+      keep: destination,
+      maxBytes: options.cacheMaxBytes ?? 1_073_741_824,
+      retentionMs: 86_400_000
+    })
+
+    return destination
+  })
+}
+
+async function materializeRemoteContextFileOnce(options: MaterializeRemoteContextFileOptions): Promise<string> {
+  const { cacheDir, destination, source } = remoteContextCachePlan(options)
+
+  await ensurePrivateDirectory(options.cacheRoot)
+  await ensurePrivateDirectory(cacheDir)
+  const existing = await cachedFile(destination, options.cacheMaxAgeMs ?? 300_000)
 
   if (existing) {
     return existing
   }
 
-  await fs.promises.mkdir(cacheDir, { recursive: true })
   const temporary = path.join(cacheDir, `.${path.basename(destination)}.${crypto.randomBytes(6).toString('hex')}.part`)
 
-  const response = await fetch(source, {
-    redirect: 'follow',
+  const fetchImpl = options.fetchImpl || fetch
+
+  const response = await fetchImpl(source, {
+    redirect: 'error',
     signal: AbortSignal.timeout(options.timeoutMs ?? 30_000)
   })
 
   if (!response.ok || !response.body) {
     throw new Error(`Failed to download context file: HTTP ${response.status}`)
-  }
-
-  if (!['http:', 'https:'].includes(new URL(response.url).protocol)) {
-    throw new Error('Remote context file redirected to an unsupported protocol')
   }
 
   const contentLength = Number(response.headers.get('content-length') || 0)
@@ -110,7 +334,7 @@ async function materializeRemoteContextFileOnce(options: MaterializeRemoteContex
     throw new Error(`Remote context file exceeds ${options.maxBytes} bytes`)
   }
 
-  const handle = await fs.promises.open(temporary, 'wx')
+  const handle = await fs.promises.open(temporary, 'wx', 0o600)
   let written = 0
 
   try {
@@ -136,6 +360,16 @@ async function materializeRemoteContextFileOnce(options: MaterializeRemoteContex
     await handle.sync()
     await handle.close()
     await fs.promises.rename(temporary, destination)
+    await fs.promises.chmod(destination, 0o600)
+
+    // Enforce the budget after publication: pruning beforehand cannot account
+    // for files that concurrent downloads are about to add, so the cache could
+    // otherwise grow past its limit without bound.
+    await pruneContextFileCache(options.cacheRoot, {
+      keep: destination,
+      maxBytes: options.cacheMaxBytes ?? 1_073_741_824,
+      retentionMs: 86_400_000
+    })
 
     return destination
   } catch (error) {

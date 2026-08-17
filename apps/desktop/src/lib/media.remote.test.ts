@@ -177,15 +177,27 @@ describe('mediaContextFileDescriptor', () => {
     expect(mediaContextFileAttr('data:image/png;base64,ZHVtbXk=')).toBeUndefined()
   })
 
-  it('keeps the original source separate from the authenticated download URL', () => {
-    $connection.set({ mode: 'remote', baseUrl: 'https://gw', token: 's e/cret' } as never)
+  it('keeps gateway credentials and download URLs out of the DOM descriptor', () => {
+    $connection.set({
+      connectionId: 'studio-ssh',
+      mode: 'remote',
+      baseUrl: 'https://gw',
+      token: 's e/cret',
+      profile: 'remote-work'
+    } as never)
 
-    expect(mediaContextFileDescriptor('/tmp/factory review.pdf')).toEqual({
-      downloadUrl: 'https://gw/api/files/download?path=%2Ftmp%2Ffactory%20review.pdf&token=s%20e%2Fcret',
+    const descriptor = mediaContextFileDescriptor('/tmp/factory review.pdf')
+    const serialized = JSON.stringify(descriptor)
+
+    expect(descriptor).toEqual({
+      connectionId: 'studio-ssh',
+      kind: 'gateway',
       name: 'factory review.pdf',
-      remote: true,
+      profile: 'remote-work',
       source: '/tmp/factory review.pdf'
     })
+    expect(serialized).not.toContain('s e/cret')
+    expect(serialized).not.toContain('downloadUrl')
   })
 })
 

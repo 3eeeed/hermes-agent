@@ -57,7 +57,7 @@ test('Windows builds an STA file-drop clipboard command with an escaped path', (
   const plan = fileClipboardPlan(filePath, 'win32')
 
   assert.equal(plan.kind, 'command')
-  assert.equal(plan.command, 'powershell.exe')
+  assert.equal(plan.command, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
   assert.equal(plan.args.includes('-STA'), true)
   assert.equal(plan.args.includes('-EncodedCommand'), true)
 

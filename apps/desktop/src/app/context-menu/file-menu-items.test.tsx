@@ -33,7 +33,7 @@ function mountMenu() {
   )
 }
 
-const descriptor = JSON.stringify({ name: 'report.pdf', remote: false, source: '/tmp/report.pdf' })
+const descriptor = JSON.stringify({ kind: 'local', name: 'report.pdf', source: '/tmp/report.pdf' })
 
 afterEach(() => {
   $contextMenu.set(null)

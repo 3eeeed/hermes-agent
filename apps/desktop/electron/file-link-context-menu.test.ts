@@ -20,21 +20,62 @@ test('turns a Windows drive path into a portable file link', () => {
   )
 })
 
-test('an internal remote descriptor keeps its authenticated download URL separate from the copied source', () => {
+test('an internal gateway descriptor carries only source identity into the privileged model', () => {
   const model = contextMenuModelForContextFile(
     JSON.stringify({
-      downloadUrl: 'https://gateway.example/api/files/download?token=secret&path=report.pdf',
+      kind: 'gateway',
       name: 'report.pdf',
-      remote: true,
+      profile: 'remote-work',
       source: '/srv/reports/report.pdf'
     }),
     'darwin'
   )
 
   assert.equal(model?.kind, 'remote-file')
+  assert.equal(model?.remoteKind, 'gateway')
+  assert.equal(model?.profile, 'remote-work')
   assert.equal(model?.source, '/srv/reports/report.pdf')
-  assert.equal(model?.downloadUrl, 'https://gateway.example/api/files/download?token=secret&path=report.pdf')
   assert.equal(model?.items.some(item => item.id === 'copy-file'), true)
+})
+
+test('rejects a DOM descriptor that injects a privileged download URL', () => {
+  const model = contextMenuModelForContextFile(
+    JSON.stringify({
+      downloadUrl: 'http://127.0.0.1/private',
+      kind: 'gateway',
+      name: 'report.pdf',
+      profile: 'remote-work',
+      source: '/srv/reports/report.pdf'
+    }),
+    'darwin'
+  )
+
+  assert.equal(model, null)
+})
+
+test('carries a registered connection only on gateway descriptors', () => {
+  const descriptor = { connectionId: 'studio-ssh', name: 'r.pdf', profile: 'remote-work', source: '/srv/r.pdf' }
+
+  assert.equal(
+    contextMenuModelForContextFile(JSON.stringify({ ...descriptor, kind: 'gateway' }), 'linux')?.connectionId,
+    'studio-ssh'
+  )
+  assert.equal(contextMenuModelForContextFile(JSON.stringify({ ...descriptor, kind: 'local' }), 'linux'), null)
+  assert.equal(
+    contextMenuModelForContextFile(JSON.stringify({ ...descriptor, connectionId: '../x', kind: 'gateway' }), 'linux'),
+    null
+  )
+})
+
+test('rejects non-file protocols in local and gateway DOM descriptors', () => {
+  for (const kind of ['local', 'gateway']) {
+    const model = contextMenuModelForContextFile(
+      JSON.stringify({ kind, name: 'payload', source: 'javascript:alert(1)' }),
+      'darwin'
+    )
+
+    assert.equal(model, null)
+  }
 })
 
 test('a local file link exposes native file actions on macOS', () => {
@@ -97,7 +138,7 @@ test('a remote Hermes media link is treated as a file that needs materialization
 
   assert.equal(model.kind, 'remote-file')
   assert.equal(model.source, source)
-  assert.equal(model.downloadUrl, source)
+  assert.equal(model.remoteKind, 'external')
   assert.deepEqual(
     new Set(model.items.map(item => item.id)),
     new Set(['open-file', 'copy-link', 'copy-path', 'copy-file', 'reveal-file'])

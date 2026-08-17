@@ -272,6 +272,15 @@ export function localPreviewTarget(rawTarget: string, cwd?: string | null): Prev
   }
 }
 
+/** The file a preview card names, resolved against the transcript session's
+ *  cwd the way its preview resolves it, so the context menu's file actions
+ *  act on the same file the card opens. */
+export function previewContextFileSource(rawTarget: string, cwd?: string | null): string {
+  const target = localPreviewTarget(rawTarget, cwd)
+
+  return target?.kind === 'file' ? target.path || target.source : target?.url || rawTarget
+}
+
 async function enrichPreviewTarget(target: PreviewTarget | null, scope?: DesktopFsSessionScope): Promise<PreviewTarget | null> {
   if (
     !isDesktopFsRemoteMode() ||

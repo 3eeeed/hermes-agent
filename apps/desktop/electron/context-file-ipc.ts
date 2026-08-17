@@ -7,10 +7,20 @@
 // which action; main re-validates both before touching anything.
 
 import { execFile } from 'node:child_process'
+import path from 'node:path'
 
 import type { IpcMain } from 'electron'
 
-import { type ContextFileActionDependencies, runContextFileAction } from './context-file-actions'
+import {
+  type ContextFileActionDependencies,
+  contextFileActionErrorMessage,
+  runContextFileAction
+} from './context-file-actions'
+import {
+  materializeDownloadedContextFile,
+  materializeLocalContextFile,
+  materializeRemoteContextFile
+} from './context-file-cache'
 import {
   contextMenuModelForContextFile,
   contextMenuModelForLink,
@@ -126,7 +136,8 @@ export async function handleContextFileAction(
   } catch (error) {
     deps.log(`Context file action failed: ${action}: ${error instanceof Error ? error.message : String(error)}`)
 
-    return { ok: false, message: 'File action failed. See the Hermes log for details.' }
+    // Raw errors can carry gateway URLs, tokens and internal addresses.
+    return { ok: false, message: contextFileActionErrorMessage(action, error) }
   }
 }
 
@@ -134,4 +145,66 @@ export function registerContextFileIpc(ipcMain: Pick<IpcMain, 'handle'>, deps: C
   ipcMain.handle('hermes:context-menu:file-action', (_event, request: ContextFileActionRequest) =>
     handleContextFileAction(request, deps)
   )
+}
+
+const CONTEXT_FILE_CACHE_MAX_BYTES = 536_870_912
+const CONTEXT_FILE_DOWNLOAD_TIMEOUT_MS = 120_000
+
+export interface ContextFileMaterializerDeps {
+  /** Private per-user cache directory (never the shared temp dir). */
+  cacheRoot: string
+  /** SSRF-guarded fetch for files on the open web. */
+  publicFetch: (url: string, init: { signal?: AbortSignal }) => Promise<Response>
+  /** Stream a gateway file to `destination` through the same authenticated,
+   *  connection/profile-routed path the renderer's Download uses. */
+  saveGatewayFileTo: (
+    request: { connectionId?: string; path: string; profile?: string; suggestedName?: string },
+    destination: string
+  ) => Promise<void>
+}
+
+/** Turn a validated menu model into a file on this disk. Local files resolve
+ *  through the hardened reader; gateway files download through the gateway's
+ *  own auth (no URL from the DOM is ever fetched with credentials); external
+ *  files may only reach public network addresses. */
+export function createContextFileMaterializer(
+  deps: ContextFileMaterializerDeps
+): (model: FileLinkContextMenuModel) => Promise<string> {
+  return async model => {
+    if (model.kind !== 'remote-file') {
+      return materializeLocalContextFile(model.source)
+    }
+
+    if (model.remoteKind === 'external') {
+      return materializeRemoteContextFile({
+        cacheKey: `external:${model.source}`,
+        cacheMaxBytes: CONTEXT_FILE_CACHE_MAX_BYTES * 2,
+        cacheRoot: deps.cacheRoot,
+        fetchImpl: (input, init) => deps.publicFetch(String(input), { signal: init?.signal ?? undefined }),
+        maxBytes: CONTEXT_FILE_CACHE_MAX_BYTES,
+        suggestedFilename: model.name,
+        timeoutMs: CONTEXT_FILE_DOWNLOAD_TIMEOUT_MS,
+        url: model.source
+      })
+    }
+
+    if (model.remoteKind !== 'gateway') {
+      throw new Error('Remote context file is missing a trusted source kind')
+    }
+
+    const suggestedName = model.name || path.basename(model.source)
+
+    return materializeDownloadedContextFile({
+      cacheKey: JSON.stringify(['gateway', model.connectionId || '', model.profile || '', model.source]),
+      cacheMaxBytes: CONTEXT_FILE_CACHE_MAX_BYTES * 2,
+      cacheRoot: deps.cacheRoot,
+      download: temporary =>
+        deps.saveGatewayFileTo(
+          { connectionId: model.connectionId, path: model.source, profile: model.profile, suggestedName },
+          temporary
+        ),
+      maxBytes: CONTEXT_FILE_CACHE_MAX_BYTES,
+      suggestedFilename: suggestedName
+    })
+  }
 }

@@ -5,7 +5,7 @@ import { useSessionView } from '@/app/chat/session-view'
 import { useI18n } from '@/i18n'
 import { isDesktopFsRemoteMode } from '@/lib/desktop-fs'
 import { Download, FolderOpen, MonitorPlay } from '@/lib/icons'
-import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
+import { normalizeOrLocalPreviewTarget, previewContextFileSource } from '@/lib/local-preview'
 import { downloadGatewayMediaFile, mediaContextFileAttr } from '@/lib/media'
 import { previewName } from '@/lib/preview-targets'
 import { notifyError } from '@/store/notifications'
@@ -250,7 +250,7 @@ export function PreviewAttachment({ target }: { target: string }) {
   return (
     <div
       className="flex w-full max-w-160 items-center gap-2 rounded-lg border border-(--ui-stroke-tertiary) bg-card/55 px-2.5 py-1.5 text-sm"
-      data-hermes-context-file={mediaContextFileAttr(target)}
+      data-hermes-context-file={mediaContextFileAttr(previewContextFileSource(target, cwd))}
     >
       <span className="grid size-6 shrink-0 place-items-center rounded-md bg-muted/55 text-muted-foreground/85">
         <MonitorPlay className="size-3.5" />

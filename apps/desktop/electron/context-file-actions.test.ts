@@ -6,10 +6,10 @@ import { runContextFileAction } from './context-file-actions'
 import type { FileLinkContextMenuModel } from './file-link-context-menu'
 
 const remoteModel: FileLinkContextMenuModel = {
-  downloadUrl: 'https://gateway.example/download?token=secret',
   items: [],
   kind: 'remote-file',
   name: 'report.pdf',
+  remoteKind: 'gateway',
   source: '/srv/reports/report.pdf'
 }
 

@@ -214,8 +214,12 @@ import {
 import type { RegistryConnection } from './connection-registry'
 import type { RosterProfileMetadata } from './connection-registry'
 import { liveWindowState, overlayWindowState } from './connection-window-state'
-import { materializeLocalContextFile, materializeRemoteContextFile } from './context-file-cache'
-import { contextMenuPlatform, osClipboardFormat, registerContextFileIpc } from './context-file-ipc'
+import {
+  contextMenuPlatform,
+  createContextFileMaterializer,
+  osClipboardFormat,
+  registerContextFileIpc
+} from './context-file-ipc'
 import { installContextMenuBridge, registerContextMenuIpc } from './context-menu-ipc'
 import { describeCrashReason, installCrashForensics } from './crash-forensics'
 import { adoptServedDashboardToken } from './dashboard-token'
@@ -483,6 +487,7 @@ import {
   tagRegistrySessionResponse,
   tagRemoteSessionRows
 } from './profile-session-routing'
+import { nodePublicFetch } from './public-file-download'
 import {
   createQuickEntryShortcut,
   createQuickEntrySubmitRelay,
@@ -7458,7 +7463,14 @@ function gatewayFileRequestPath(
     : pathWithGlobalRemoteProfile(requestPath, profile, profileRouteOptions(profile))
 }
 
-async function saveGatewayFile(payload: GatewayFileSavePayload = {}): Promise<GatewayFileSaveResult> {
+async function saveGatewayFile(
+  payload: GatewayFileSavePayload = {},
+  // The context menu's file actions download into their private cache, so
+  // they answer the "save dialog" with that destination themselves.
+  showSaveDialog: GatewayFileSaveDeps['showSaveDialog'] = (
+    options: GatewaySaveDialogOptions
+  ): Promise<GatewaySaveDialogResult> => dialog.showSaveDialog(mainWindow, options)
+): Promise<GatewayFileSaveResult> {
   const filePath = gatewayFilePath(payload.path)
 
   if (!filePath) {
@@ -7480,10 +7492,7 @@ async function saveGatewayFile(payload: GatewayFileSavePayload = {}): Promise<Ga
     payload.sessionId
   )
 
-  const deps: GatewayFileSaveDeps = {
-    showSaveDialog: (options: GatewaySaveDialogOptions): Promise<GatewaySaveDialogResult> =>
-      dialog.showSaveDialog(mainWindow, options)
-  }
+  const deps: GatewayFileSaveDeps = { showSaveDialog }
 
   return saveGatewayDownload(requestPaths, ctx, {
     ...deps,
@@ -16430,9 +16439,6 @@ ipcMain.handle('hermes:saveGatewayFile', (_event, payload) => saveGatewayFile(pa
 
 ipcMain.handle('hermes:saveImageFromUrl', (_event, url) => saveImageFromUrl(String(url || '')))
 
-const CONTEXT_FILE_CACHE_MAX_BYTES = 536_870_912
-const CONTEXT_FILE_DOWNLOAD_TIMEOUT_MS = 120_000
-
 // The chat context menu's file actions (Open, Copy link/path/file, Reveal).
 // The renderer names the clicked file; main materializes it locally first.
 registerContextFileIpc(ipcMain, {
@@ -16440,23 +16446,17 @@ registerContextFileIpc(ipcMain, {
     clipboard.write([new ClipboardItem({ [osClipboardFormat(format)]: new Blob([new Uint8Array(data)]) })]),
   copyText: value => clipboard.writeText(value),
   log: rememberLog,
-  materialize: async model => {
-    if (model.kind !== 'remote-file') {
-      return materializeLocalContextFile(model.source)
-    }
+  materialize: createContextFileMaterializer({
+    cacheRoot: path.join(app.getPath('userData'), 'context-file-cache'),
+    publicFetch: (url, init) => nodePublicFetch(url, init),
+    saveGatewayFileTo: async (request, destination) => {
+      const result = await saveGatewayFile(request, async () => ({ canceled: false, filePath: destination }))
 
-    if (!model.downloadUrl) {
-      throw new Error('Remote context file is missing a download URL')
+      if (!result.saved) {
+        throw new Error('Gateway context file download did not complete')
+      }
     }
-
-    return materializeRemoteContextFile({
-      cacheRoot: path.join(app.getPath('temp'), 'hermes-context-files'),
-      maxBytes: CONTEXT_FILE_CACHE_MAX_BYTES,
-      suggestedFilename: model.name,
-      timeoutMs: CONTEXT_FILE_DOWNLOAD_TIMEOUT_MS,
-      url: model.downloadUrl
-    })
-  },
+  }),
   openPath: filePath => shell.openPath(filePath),
   platform: contextMenuPlatform(),
   revealFile: filePath => shell.showItemInFolder(filePath)

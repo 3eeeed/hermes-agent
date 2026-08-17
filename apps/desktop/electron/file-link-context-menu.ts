@@ -1,5 +1,7 @@
 import { pathToFileURL } from 'node:url'
 
+import { DESKTOP_PROFILE_NAME_RE } from './desktop-profile'
+
 export type ContextMenuPlatform = 'darwin' | 'linux' | 'win32'
 
 export type FileLinkMenuItemId = 'copy-file' | 'copy-link' | 'copy-path' | 'open-file' | 'open-link' | 'reveal-file'
@@ -15,19 +17,26 @@ export interface FileLinkMenuItem {
 }
 
 export interface FileLinkContextMenuModel {
-  downloadUrl?: string
+  /** Registered gateway connection that owns a `gateway` file. */
+  connectionId?: string
   items: FileLinkMenuItem[]
   kind: 'local-file' | 'remote-file' | 'web-link'
   name?: string
+  profile?: string
+  remoteKind?: 'external' | 'gateway'
   source: string
 }
 
 interface ContextFileDescriptor {
-  downloadUrl?: string
+  connectionId?: string
+  kind: 'external' | 'gateway' | 'local'
   name: string
-  remote: boolean
+  profile?: string
   source: string
 }
+
+// Registry connection ids are slugs; anything else never names a connection.
+const CONNECTION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 
 function revealLabel(platform: ContextMenuPlatform): string {
   return platform === 'darwin' ? 'Show in Finder' : platform === 'win32' ? 'Show in Explorer' : 'Show in File Manager'
@@ -75,33 +84,58 @@ export function contextMenuModelForContextFile(
 
   try {
     const value = JSON.parse(rawDescriptor) as Partial<ContextFileDescriptor>
-    const source = typeof value.source === 'string' ? value.source.trim() : ''
-    const name = typeof value.name === 'string' ? value.name.trim() : ''
+    const keys = value && typeof value === 'object' ? Object.keys(value) : []
 
-    if (!source || !name || source.length > 16_384 || name.length > 1_024 || typeof value.remote !== 'boolean') {
+    if (keys.some(key => !['connectionId', 'kind', 'name', 'profile', 'source'].includes(key))) {
       return null
     }
 
-    if (value.remote) {
-      const downloadUrl = typeof value.downloadUrl === 'string' ? value.downloadUrl : ''
+    const source = typeof value.source === 'string' ? value.source.trim() : ''
+    const name = typeof value.name === 'string' ? value.name.trim() : ''
+    const kind = value.kind
+    const profile = typeof value.profile === 'string' ? value.profile.trim() : ''
+    const connectionId = typeof value.connectionId === 'string' ? value.connectionId.trim() : ''
 
-      if (!/^https?:\/\//i.test(downloadUrl)) {
-        return null
-      }
+    if (
+      !source ||
+      !name ||
+      source.length > 16_384 ||
+      name.length > 1_024 ||
+      !['external', 'gateway', 'local'].includes(kind || '') ||
+      (profile && !DESKTOP_PROFILE_NAME_RE.test(profile)) ||
+      (connectionId && !CONNECTION_ID_RE.test(connectionId)) ||
+      ((profile || connectionId) && kind !== 'gateway')
+    ) {
+      return null
+    }
 
+    if (kind === 'external' && !/^https?:\/\//i.test(source)) {
+      return null
+    }
+
+    const hasNonFileScheme =
+      /^[a-z][a-z\d+.-]*:/i.test(source) && !/^file:/i.test(source) && !/^[a-z]:[\\/]/i.test(source)
+
+    if (kind !== 'external' && hasNonFileScheme) {
+      return null
+    }
+
+    if (kind === 'local') {
       return {
-        kind: 'remote-file',
+        kind: 'local-file',
         source,
         name,
-        downloadUrl,
         items: fileMenuItems(platform)
       }
     }
 
     return {
-      kind: 'local-file',
+      kind: 'remote-file',
+      remoteKind: kind,
       source,
       name,
+      ...(profile ? { profile } : {}),
+      ...(connectionId ? { connectionId } : {}),
       items: fileMenuItems(platform)
     }
   } catch {
@@ -122,7 +156,7 @@ export function contextMenuModelForLink(
       kind: remote ? 'remote-file' : 'local-file',
       source: mediaSource,
       name: params.suggestedFilename || undefined,
-      ...(remote ? { downloadUrl: mediaSource } : {}),
+      ...(remote ? { remoteKind: 'external' as const } : {}),
       items: fileMenuItems(platform)
     }
   }
