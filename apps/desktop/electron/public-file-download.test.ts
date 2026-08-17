@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import http from 'node:http'
+import os from 'node:os'
+import path from 'node:path'
 
 import { afterEach, test } from 'vitest'
 
+import { materializeRemoteContextFile } from './context-file-cache'
 import {
   assertPublicDownloadUrl,
   fetchPublicDownload,
@@ -10,10 +14,15 @@ import {
   publicSocketLookup
 } from './public-file-download'
 
+const cleanupPaths: string[] = []
 const cleanupServers: http.Server[] = []
 
 afterEach(async () => {
   await Promise.all(cleanupServers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve()))))
+
+  for (const target of cleanupPaths.splice(0)) {
+    fs.rmSync(target, { force: true, recursive: true })
+  }
 })
 
 async function serve(handler: http.RequestListener): Promise<{ port: number }> {
@@ -164,6 +173,102 @@ test('streams a large body to completion without stalling on connection teardown
 
   assert.equal(body.length, chunk.length * chunks)
 }, 15_000)
+
+test('drains redirect-hop bodies instead of abandoning them', async () => {
+  const cancelled: string[] = []
+
+  const hop = (name: string, init: ResponseInit) => {
+    const stream = new ReadableStream({
+      cancel: () => {
+        cancelled.push(name)
+      },
+      pull: controller => {
+        controller.enqueue(new Uint8Array(1024))
+      }
+    })
+
+    return new Response(stream, init)
+  }
+
+  let call = 0
+
+  const fetchImpl = async () => {
+    call += 1
+
+    return call === 1
+      ? hop('redirect', { status: 302, headers: { location: 'https://files.example/final.pdf' } })
+      : hop('final', { status: 200 })
+  }
+
+  const response = await fetchPublicDownload('https://files.example/report.pdf', {
+    fetchImpl,
+    lookup: publicLookup
+  })
+
+  assert.equal(response.status, 200)
+  assert.deepEqual(cancelled, ['redirect'])
+})
+
+test('releases the real connection pool when the cache rejects a failing download', async () => {
+  const sockets = { closed: 0, opened: 0 }
+  const payload = Buffer.alloc(2_000_000, 0x41)
+
+  const { port } = await serve((request, response) => {
+    if (request.url?.includes('toobig')) {
+      response.writeHead(200, { 'content-length': String(payload.length) })
+      response.end(payload)
+
+      return
+    }
+
+    response.writeHead(500, { 'content-length': String(payload.length) })
+    response.end(payload)
+  })
+
+  cleanupServers[cleanupServers.length - 1].on('connection', socket => {
+    sockets.opened += 1
+    socket.on('close', () => {
+      sockets.closed += 1
+    })
+  })
+
+  const cacheRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-real-agent-'))
+  cleanupPaths.push(cacheRoot)
+
+  for (const name of ['toobig', 'failing']) {
+    await assert.rejects(() =>
+      materializeRemoteContextFile({
+        cacheRoot,
+        fetchImpl: (input, init) =>
+          nodePublicFetch(String(input), {
+            abandonedBodyGraceMs: 200,
+            lookup: publicLookup,
+            signal: init?.signal,
+            socketLookup: (_hostname, _options, callback) => {
+              callback(null, [{ address: '127.0.0.1', family: 4 }] as never)
+            }
+          }),
+        maxBytes: 1024,
+        suggestedFilename: `${name}.bin`,
+        url: `http://public.invalid:${port}/${name}.bin`
+      })
+    )
+  }
+
+  const deadline = Date.now() + 8_000
+
+  while (sockets.closed < sockets.opened && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+
+  assert.equal(sockets.opened > 0, true)
+  assert.equal(
+    sockets.closed,
+    sockets.opened,
+    `rejected downloads leaked connections: opened=${sockets.opened} closed=${sockets.closed}`
+  )
+  assert.deepEqual(fs.readdirSync(cacheRoot, { recursive: true }).filter(entry => String(entry).endsWith('.bin')), [])
+}, 25_000)
 
 test('closes the connection pool when a caller abandons the response body', async () => {
   const sockets = { closed: 0, opened: 0 }

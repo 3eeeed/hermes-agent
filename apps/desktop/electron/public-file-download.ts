@@ -223,6 +223,10 @@ export async function fetchPublicDownload(rawUrl: string, options: PublicFetchOp
       return response
     }
 
+    // Release the redirect hop's connection: an unread body keeps the socket
+    // checked out of the pool for the lifetime of the process.
+    await response.body?.cancel().catch(() => undefined)
+
     const location = response.headers.get('location')
 
     if (!location || redirects === maxRedirects) {
