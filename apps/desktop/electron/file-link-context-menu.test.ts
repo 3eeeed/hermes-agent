@@ -54,3 +54,15 @@ test('a remote Hermes media link is treated as a file that needs materialization
   )
   assert.equal(model.items.find(item => item.id === 'reveal-file')?.label, 'Show in File Manager')
 })
+
+test('Windows labels the reveal action for Explorer', () => {
+  const model = contextMenuModelForLink(
+    {
+      linkURL: 'file:///C:/Users/Ahmed/review.pdf',
+      suggestedFilename: 'review.pdf'
+    },
+    'win32'
+  )
+
+  assert.equal(model.items.find(item => item.id === 'reveal-file')?.label, 'Show in Explorer')
+})
