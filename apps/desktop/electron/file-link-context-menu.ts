@@ -18,13 +18,17 @@ export interface FileLinkContextMenuModel {
   source: string
 }
 
+function revealLabel(platform: ContextMenuPlatform): string {
+  return platform === 'darwin' ? 'Show in Finder' : platform === 'win32' ? 'Show in Explorer' : 'Show in File Manager'
+}
+
 function fileMenuItems(platform: ContextMenuPlatform): FileLinkMenuItem[] {
   return [
     { id: 'open-file', label: 'Open File' },
     { id: 'copy-link', label: 'Copy Link' },
     { id: 'copy-path', label: 'Copy Path' },
     { id: 'copy-file', label: 'Copy File' },
-    { id: 'reveal-file', label: platform === 'darwin' ? 'Show in Finder' : 'Show in File Manager' }
+    { id: 'reveal-file', label: revealLabel(platform) }
   ]
 }
 
