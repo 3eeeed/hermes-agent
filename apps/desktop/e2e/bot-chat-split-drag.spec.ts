@@ -1,18 +1,19 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { startMockServer } from '../../../tests-js/scripts/mock-server'
+
 import {
   buildAppEnv,
   createSandbox,
   launchDesktop,
+  type MockBackendFixture,
   waitForAppReady,
   writeEnvFile,
-  writeMockProviderConfig,
-  type MockBackendFixture
+  writeMockProviderConfig
 } from './fixtures'
-import { startMockServer } from '../../../tests-js/scripts/mock-server'
 import { RealSessionBuilder } from './real-session-builder'
-import { expect, test } from './test'
+import { allowErrorBanners, expect, test } from './test'
 
 // Regression for upstream #109684 (Desktop Bot Mode):
 //
@@ -141,10 +142,12 @@ async function dragTo(page: Page, from: { x: number; y: number }, to: { x: numbe
   await page.mouse.move(from.x, from.y)
   await page.mouse.down()
   const steps = 16
+
   for (let i = 1; i <= steps; i += 1) {
     await page.mouse.move(from.x + ((to.x - from.x) * i) / steps, from.y + ((to.y - from.y) * i) / steps)
     await page.waitForTimeout(40)
   }
+
   await page.waitForTimeout(400)
   await page.mouse.up()
   await page.waitForTimeout(1500)
@@ -181,6 +184,10 @@ test.afterEach(async () => {
 
 test('dragging a bot chat tab to the workspace edge yields a usable split pane', async () => {
   test.setTimeout(600_000)
+  // Main hands over to the stacked `+` draft once the chat moves out. That
+  // draft is minted without owner metadata (#108369), so its promotion raises
+  // the pre-existing "Session controls unavailable" banner on main too.
+  allowErrorBanners()
   const page = fixture!.page
 
   await openBotChatWithStrip(page, 'alpha')
@@ -197,8 +204,6 @@ test('dragging a bot chat tab to the workspace edge yields a usable split pane',
     { x: win.w - 16, y: Math.round(win.h / 3) }
   )
 
-  console.log('AFTER DRAG:', JSON.stringify(await zones(page), null, 1))
-
   // Split view means BOTH surfaces on screen at the same time: the bot chat in
   // its own pane, the side thread still in the other.
   await expect(chatVisible(page, 'Hello alpha')).toBeVisible({ timeout: 30_000 })
@@ -208,7 +213,14 @@ test('dragging a bot chat tab to the workspace edge yields a usable split pane',
   expect(deadZones(after)).toEqual([])
   // ...and the drop really split the workspace in two.
   expect(liveZones(after).length).toBeGreaterThanOrEqual(2)
-  await page.screenshot({ path: '/tmp/e2e-bot-drag-split.png' })
+
+  // The drag is a MOVE: a session lives in exactly one surface. Main let the
+  // chat go, so its strip carries ONE Alpha tab (the tile's) and clicking every
+  // Alpha tab never paints the transcript twice.
+  const alphaTabs = visibleTabs(page).filter({ hasText: /alpha/i })
+  await expect.poll(() => alphaTabs.count(), { timeout: 15_000 }).toBe(1)
+  await alphaTabs.first().click()
+  await expect.poll(() => page.getByText('Hello alpha', { exact: true }).filter({ visible: true }).count()).toBe(1)
 })
 
 test('closing the bot tab and reopening it from the BOTS roster brings the chat back', async () => {
