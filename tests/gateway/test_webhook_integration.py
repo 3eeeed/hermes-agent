@@ -298,8 +298,12 @@ class TestCrossPlatformDelivery:
             )
 
             @staticmethod
-            def _profile_name_for_source(source):
+            def _profile_name_for_source(source, **_kwargs):
                 return None
+
+            @classmethod
+            def _authorization_adapter(cls, platform, profile=None):
+                return cls.adapters.get(platform)
 
         adapter.gateway_runner = _Runner()
         first_started = asyncio.Event()
