@@ -156,11 +156,15 @@ _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
     # (slash-commands only exist inside an interactive session).
     {"id": "copilot-acp", "name": "GitHub Copilot (ACP)", "flow": "external", "cli_command": "copilot login",
      "docs_url": "https://docs.github.com/en/copilot", "status_fn": _copilot_acp_status},
-    # Anthropic / Claude entries sit at the bottom. Deliberately flow == "external": an
-    # in-dashboard Connect button would let a scriptable HTTP endpoint mint Claude Pro/Max
-    # subscription tokens outside Anthropic's own client, against its OAuth usage policies.
-    # Login works via the terminal (`hermes auth add anthropic`) or a plain API key.
-    {"id": "anthropic", "name": "Anthropic API Key", "flow": "external", "cli_command": "hermes auth add anthropic",
+    # Anthropic / Claude entries sit at the bottom. `pkce`: the dashboard drives the
+    # same PKCE grant as `hermes auth add anthropic`, sharing that flow's helpers
+    # (agent.anthropic_credentials.begin/complete_hermes_oauth_pure) rather than
+    # reimplementing it. An earlier parallel dashboard implementation was removed in
+    # 0099f250c2 for leaking the PKCE verifier as `state` and skipping the CSRF state
+    # check; reusing the CLI helpers is what keeps those bugs from returning, so do not
+    # re-fork this flow. The verifier stays server-side in the session store.
+    {"id": "anthropic", "name": "Anthropic (Claude Pro/Max or API Key)", "flow": "pkce",
+     "cli_command": "hermes auth add anthropic",
      "docs_url": "https://docs.claude.com/en/api/getting-started", "status_fn": _anthropic_oauth_status},
     {"id": "claude-code", "name": "Anthropic OAuth: Required Extra Usage Credits to Use Subscription",
      "flow": "external", "cli_command": "claude setup-token",
