@@ -19,7 +19,7 @@ import { useBots } from './i18n'
 import { resolveBotConnectionRoute } from './routing'
 import { type DisplayLease, displayRequest, type DisplayStatus, isDisplayUnavailable, isEventForBotScreen, leaseHeldBy, type ScreenViewer } from './screen-connection'
 import { openBotScreen } from './screen-open'
-import { $screenState, screenStateFor, setScreenLease, setScreenStatus, setScreenUnavailable } from './screen-state'
+import { $screenState, beginScreenStatusRequest, screenStateFor, setScreenLease, setScreenStatus, setScreenUnavailable } from './screen-state'
 import type { RosterRow } from './types'
 
 export type PortalTone = 'live' | 'human' | 'other' | 'off' | 'missing' | 'unsupported' | 'unavailable' | 'unknown'
@@ -87,11 +87,14 @@ export function useScreenPortalState(bot: RosterRow) {
     }
 
     let cancelled = false
+    // A network reply, not an event: hand the token back so a snapshot that a newer request or a
+    // pushed status superseded while in flight is dropped instead of landing as authoritative.
+    const request = beginScreenStatusRequest(bot)
 
     void displayRequest<DisplayStatus>(bot, 'display.status')
       .then(next => {
         if (!cancelled) {
-          setScreenStatus(bot, next)
+          setScreenStatus(bot, next, request)
         }
       })
       .catch((error: unknown) => {
