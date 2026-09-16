@@ -850,7 +850,15 @@ def recover_with_credential_pool(
             "Credential %s (%s) — rotated to pool entry %s",
             rotate_status, label, getattr(next_entry, "id", "?"),
         )
-        return agent._swap_credential(next_entry) is not False
+        swapped = agent._swap_credential(next_entry) is not False
+        if swapped:
+            callback = getattr(agent, "credential_rotation_callback", None)
+            if callable(callback):
+                try:
+                    callback(next_entry)
+                except Exception:
+                    _ra().logger.debug("credential rotation callback failed", exc_info=True)
+        return swapped
     if effective_reason == FailoverReason.upstream_rate_limit:
         # Upstream (e.g. DeepSeek behind OpenRouter) is throttling the aggregator; the credential is
         # healthy. Do not rotate/exhaust; let fallback switch models.

@@ -201,3 +201,49 @@ def test_fetch_account_usage_openrouter_omits_quota_window_when_key_has_no_limit
     assert snapshot.windows == ()
     assert "Credits balance: $74.50" in snapshot.details
     assert "API key usage: $25.50 total • $1.25 today • $4.50 this week • $18.00 this month" in snapshot.details
+
+
+class _CapturingClient:
+    """Records the Authorization header so per-account attribution is assertable."""
+
+    def __init__(self, payload, seen):
+        self._payload, self._seen = payload, seen
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, url, headers=None):
+        self._seen.append((headers or {}).get("Authorization", ""))
+        return _Response(self._payload)
+
+
+_ANTHROPIC_USAGE_PAYLOAD = {
+    "five_hour": {"utilization": 0.25, "resets_at": "2026-01-01T00:00:00Z"},
+}
+
+
+def test_anthropic_usage_uses_passed_api_key_not_ambient_token(monkeypatch):
+    """Per-account usage must bill the account it was asked about.
+
+    The pool passes each entry's own token as ``api_key``; ignoring it and
+    falling back to resolve_anthropic_token() makes every Claude account in
+    the pool report the *same* (first/ambient) account's usage.
+    """
+    seen: list[str] = []
+    # Ambient/global token — deliberately different from the per-entry token.
+    monkeypatch.setattr("agent.account_usage.resolve_anthropic_token", lambda: "ambient-oauth-token")
+    monkeypatch.setattr("agent.account_usage._is_oauth_token", lambda tok: True)
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _CapturingClient(_ANTHROPIC_USAGE_PAYLOAD, seen),
+    )
+
+    fetch_account_usage("anthropic", base_url=None, api_key="per-entry-token")
+
+    assert seen, "usage endpoint was never called"
+    assert seen[0] == "Bearer per-entry-token", (
+        f"usage was billed to the wrong account: {seen[0]!r}"
+    )

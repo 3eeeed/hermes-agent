@@ -1214,6 +1214,42 @@ class TurnRunner:
         baked into the cached agent."""
         ctx = self._ctx
         runner = self._runner
+        # Per-session account pin: which pooled account this conversation runs
+        # on. Re-applied at the start of every new turn (including when the
+        # AIAgent is cached), so it never changes a request already in flight.
+        # Keyed per provider so a Codex pin can never select an Anthropic entry
+        # (and vice versa) when the opaque ids collide.
+        from agent.credential_pool import POOL_PIN_KEYS
+
+        pool = getattr(agent, "credential_pool", None) or getattr(agent, "_credential_pool", None)
+        pin_key = POOL_PIN_KEYS.get(getattr(pool, "provider", "") if pool is not None else "")
+
+        def _session_db():
+            """Resolved lazily: turn wiring runs for unpooled providers too, and
+            those runners need not carry a session store at all."""
+            store = getattr(runner, "_session_db", None)
+            return getattr(store, "_db", store)
+
+        if pin_key and ctx.session_id:
+            store = _session_db()
+            selected_credential_id = (
+                store.get_session_model_config_value(ctx.session_id, pin_key) if store else None
+            )
+            if selected_credential_id and pool is not None:
+                selected_entry = next(
+                    (entry for entry in pool.entries() if entry.id == selected_credential_id), None
+                )
+                if selected_entry is not None:
+                    agent._swap_credential(selected_entry)
+
+        def persist_rotated_credential(entry) -> None:
+            if not (ctx.session_id and pin_key):
+                return
+            store = _session_db()
+            if store is not None:
+                store.patch_session_model_config(ctx.session_id, {pin_key: entry.id})
+
+        agent.credential_rotation_callback = persist_rotated_credential
         # ALWAYS attached (never gated to None): its body gates each event class, and subagent-
         # failure notices must fire even with tool_progress/thinking off.
         agent.tool_progress_callback = ctx.progress_callback

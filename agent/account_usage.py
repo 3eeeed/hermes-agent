@@ -541,7 +541,11 @@ def redeem_codex_reset_credit(
 def _fetch_anthropic_account_usage(
     base_url: Optional[str] = None, api_key: Optional[str] = None
 ) -> Optional[AccountUsageSnapshot]:
-    token = (resolve_anthropic_token() or "").strip()
+    # Per-account attribution: when the caller passes a specific entry's token
+    # (the credential-pool usage path does), bill THAT account. Falling back to
+    # the ambient token here would make every pooled Claude account report the
+    # same numbers.
+    token = (api_key or "").strip() or (resolve_anthropic_token() or "").strip()
     if not token:
         return None
     if not _is_oauth_token(token):

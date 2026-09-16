@@ -113,6 +113,15 @@ AUTH_TYPE_API_KEY = "api_key"
 SOURCE_MANUAL = "manual"
 SOURCE_MANUAL_DEVICE_CODE = f"{SOURCE_MANUAL}:device_code"
 
+# Providers whose accounts are managed from the desktop account menu, mapped to
+# the per-session model-config key that pins one account. Keyed per provider so
+# a pin for one provider can never select another provider's entry when the
+# opaque ids collide. Consumed by the turn runner and the dashboard routes.
+POOL_PIN_KEYS: Dict[str, str] = {
+    "openai-codex": "openai_codex_credential_id",
+    "anthropic": "anthropic_credential_id",
+}
+
 STRATEGY_FILL_FIRST = "fill_first"
 STRATEGY_ROUND_ROBIN = "round_robin"
 STRATEGY_RANDOM = "random"
