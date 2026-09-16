@@ -869,9 +869,16 @@ def recover_with_credential_pool(
             # session does too (#114501). Only when the benched entry OUTRANKS the one we rotated
             # to: a session that was already on the fallback (preferred benched elsewhere) and
             # rotates UP once the preferred window reopened must not be pulled back down when
-            # the fallback's cooldown lifts. Keep the FIRST benched entry across chained
+            # fallback's cooldown lifts. Keep the FIRST benched entry across chained
             # rotations — it is the preferred one. Auth benches are not windows; they stay.
             agent._credential_pool_revert_id = credential_id
+        if swapped:
+            callback = getattr(agent, "credential_rotation_callback", None)
+            if callable(callback):
+                try:
+                    callback(next_entry)
+                except Exception:
+                    _ra().logger.debug("credential rotation callback failed", exc_info=True)
         return swapped
     if effective_reason == FailoverReason.upstream_rate_limit:
         # Upstream (e.g. DeepSeek behind OpenRouter) is throttling the aggregator; the credential is
