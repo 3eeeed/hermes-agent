@@ -42,12 +42,10 @@ def _build_browser_env() -> dict:
 
     env = hermes_subprocess_env(inherit_credentials=False)
     env.update({k: os.environ[k] for k in _BROWSER_PASSTHROUGH_KEYS if k in os.environ})
-    # Headed Chromium opens on this profile's Bot Desktop (human can take it over). A window needs a screen, so a
-    # headed request is a "first use" exactly like a computer_use call: same auto-start hook (bot_desktop.auto_start,
-    # opt-in; a no-op when the screen is up or the host has a display). Headless browsing never brings one up.
-    from tools.bot_desktop.runtime import desktop_env as _bot_desktop_env, ensure_started_for_tool as _bd_ensure_started
-    if _cloud._is_headed_mode():
-        _bd_ensure_started()
+    # Headed Chromium opens on this profile's Bot Desktop when one is running (human can take it over). Pure: this
+    # builder also serves the npx cache warmer, the Chromium auto-installer and the Lightpanda engine, none of which
+    # may bring a screen up — the auto-start hook lives at the headed Chromium spawn sites (browser_tool_session).
+    from tools.bot_desktop.runtime import desktop_env as _bot_desktop_env
     return _bot_desktop_env(env)
 
 
