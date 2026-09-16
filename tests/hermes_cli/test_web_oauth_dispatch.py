@@ -593,33 +593,53 @@ def test_xai_oauth_listed_as_device_code_flow():
     assert "grok" in providers["xai-oauth"]["name"].lower()
 
 
-def test_anthropic_dashboard_oauth_is_removed_and_external():
-    """Anthropic subscription OAuth is not minted by the dashboard anymore."""
-    from hermes_cli import web_server as ws
+def test_anthropic_dashboard_oauth_uses_the_shared_pkce_helpers():
+    """Anthropic logs in from the dashboard via the same PKCE grant as the CLI.
 
+    The earlier dashboard flow was removed in 0099f250c2 because it was a parallel
+    reimplementation that leaked the PKCE verifier as `state` and never checked the
+    CSRF state. This flow is only safe because it delegates to
+    agent.anthropic_credentials.begin/complete_hermes_oauth_pure, so the assertions
+    below pin that the verifier never reaches the client.
+    """
     resp = client.get("/api/providers/oauth", headers=HEADERS)
     assert resp.status_code == 200, resp.text
     providers = {p["id"]: p for p in resp.json()["providers"]}
-    assert providers["anthropic"]["flow"] == "external"
-    assert providers["anthropic"]["cli_command"] == "hermes auth add anthropic"
+    assert providers["anthropic"]["flow"] == "pkce"
 
-    before_sessions = set(_web_server_oauth._oauth_sessions)
-    start_resp = client.post(
-        "/api/providers/oauth/anthropic/start",
-        headers=HEADERS,
-    )
-    assert start_resp.status_code == 400, start_resp.text
-    assert "external CLI" in start_resp.text
-    assert "claude.ai" not in start_resp.text
+    start_resp = client.post("/api/providers/oauth/anthropic/start", headers=HEADERS)
+    assert start_resp.status_code == 200, start_resp.text
+    payload = start_resp.json()
+    assert "claude.ai/oauth/authorize" in payload["auth_url"]
+    assert "code_challenge_method=S256" in payload["auth_url"]
 
-    submit_resp = client.post(
+    session_id = payload["session_id"]
+    with _web_server_oauth._oauth_sessions_lock:
+        stashed = _web_server_oauth._oauth_sessions[session_id]
+        verifier = stashed["verifier"]
+    try:
+        assert verifier not in start_resp.text, "PKCE verifier leaked to the client"
+        assert verifier not in payload["auth_url"]
+
+        # A bad code must be rejected, not exchanged.
+        submit_resp = client.post(
+            "/api/providers/oauth/anthropic/submit",
+            headers=HEADERS,
+            json={"session_id": session_id, "code": "some-code#wrong-state"},
+        )
+        assert submit_resp.status_code == 400, submit_resp.text
+    finally:
+        with _web_server_oauth._oauth_sessions_lock:
+            _web_server_oauth._oauth_sessions.pop(session_id, None)
+
+
+def test_anthropic_submit_rejects_an_unknown_session():
+    resp = client.post(
         "/api/providers/oauth/anthropic/submit",
         headers=HEADERS,
-        json={"session_id": "unused", "code": "unused"},
+        json={"session_id": "does-not-exist", "code": "c#s"},
     )
-    assert submit_resp.status_code == 400, submit_resp.text
-    assert "not supported" in submit_resp.text
-    assert set(_web_server_oauth._oauth_sessions) == before_sessions
+    assert resp.status_code == 404, resp.text
 
 
 def test_accounts_offers_every_oauth_provider_from_catalog():
@@ -829,3 +849,56 @@ def test_status_falls_through_to_generic_dispatcher_for_catalog_only_provider():
 
 
 
+
+
+def test_codex_add_account_appends_pool_entry_without_replacing_existing(tmp_path, monkeypatch):
+    """A 2nd dashboard Codex login with add_account must KEEP the 1st account.
+
+    Regression: the dashboard's "+ Add account" reused the singleton save path
+    (`_save_codex_tokens`), which mirrors exactly ONE grant, so authorizing a
+    second account silently collapsed the list back to one entry. With
+    ``add_account`` the worker appends an independent ``manual:device_code``
+    pool entry instead, which is what `hermes auth add openai-codex` does.
+    """
+    from agent.credential_pool import load_pool, write_credential_pool
+    from hermes_cli import auth as auth_mod
+
+    _make_profile_home(tmp_path, monkeypatch, profile="coder")
+
+    # Account #1 already saved (as the singleton path would have left it),
+    # written in the same profile scope the worker will save into.
+    with _rt_oauth._profile_scope("coder"):
+        write_credential_pool("openai-codex", [{
+            "id": "acct1", "label": "first@example.com", "auth_type": "oauth",
+            "priority": 0, "source": "manual:device_code",
+            "access_token": "at-first", "refresh_token": "rt-first",
+        }])
+
+    singleton_saves = []
+    monkeypatch.setattr(auth_mod, "_save_codex_tokens", lambda tokens: singleton_saves.append(tokens))
+
+    sid, sess = _rt_oauth._new_oauth_session("openai-codex", "device_code", profile="coder")
+    sess["add_account"] = True
+    sess.update(user_code="CODEX-2", verification_url="https://example/device",
+                device_auth_id="dev-2", interval=0, expires_in=600)
+
+    monkeypatch.setattr(_rt_oauth, "_codex_request_user_code", lambda _httpx: {
+        "device_auth_id": "dev-2", "interval": 3, "user_code": "CODEX-2",
+    })
+    monkeypatch.setattr(_rt_oauth, "_codex_poll_authorization",
+                        lambda _httpx, _sess, _sid: {"authorization_code": "code", "code_verifier": "ver"})
+    monkeypatch.setattr(_rt_oauth, "_codex_exchange_tokens",
+                        lambda _httpx, _resp: {"access_token": "at-second", "refresh_token": "rt-second"})
+
+    try:
+        _rt_oauth._codex_full_login_worker(sid)
+    finally:
+        _web_server_oauth._oauth_sessions.pop(sid, None)
+
+    # The worker saves inside the session's profile scope, so assert there.
+    with _rt_oauth._profile_scope("coder"):
+        entries = load_pool("openai-codex").entries()
+        tokens = {e.access_token for e in entries}
+    # Both accounts coexist, and the singleton path was never used.
+    assert tokens == {"at-first", "at-second"}, [e.label for e in entries]
+    assert singleton_saves == []

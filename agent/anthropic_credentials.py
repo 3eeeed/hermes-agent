@@ -497,17 +497,59 @@ def _generate_pkce() -> tuple:
     return verifier, challenge
 
 
-def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
-    """Run Hermes-native OAuth PKCE flow and return credential state."""
-    import webbrowser
+def begin_hermes_oauth_pure() -> Dict[str, str]:
+    """Start a PKCE login: build the authorize URL and the secrets that complete it.
+
+    Split out of ``run_hermes_oauth_login_pure`` so non-terminal callers (the
+    desktop account menu) can run the same grant without stdin. The caller must
+    hold ``verifier``/``state`` until the user pastes the code back.
+    """
     from urllib.parse import urlencode
+
     verifier, challenge = _generate_pkce()
     oauth_state = secrets.token_urlsafe(32)
     params = {
-        "code": "true", "client_id": _OAUTH_CLIENT_ID, "response_type": "code", "redirect_uri": _OAUTH_REDIRECT_URI,
-        "scope": _OAUTH_SCOPES, "code_challenge": challenge, "code_challenge_method": "S256", "state": oauth_state,
+        "code": "true", "client_id": _OAUTH_CLIENT_ID, "response_type": "code",
+        "redirect_uri": _OAUTH_REDIRECT_URI, "scope": _OAUTH_SCOPES,
+        "code_challenge": challenge, "code_challenge_method": "S256", "state": oauth_state,
     }
-    auth_url = f"https://claude.ai/oauth/authorize?{urlencode(params)}"
+    return {
+        "authorize_url": f"https://claude.ai/oauth/authorize?{urlencode(params)}",
+        "verifier": verifier,
+        "state": oauth_state,
+    }
+
+
+def complete_hermes_oauth_pure(auth_code: str, verifier: str, expected_state: str) -> Dict[str, Any]:
+    """Exchange a pasted authorization code for tokens. Raises ValueError on a bad code.
+
+    Anthropic hands the user a ``code#state`` string. The state half is the CSRF
+    guard (RFC 6749 section 10.12) and is verified here, before any exchange, so a
+    callback from a different flow can never be redeemed.
+    """
+    splits = (auth_code or "").strip().split("#")
+    code, received_state = splits[0], (splits[1] if len(splits) > 1 else "")
+    if received_state and expected_state and received_state != expected_state:
+        logger.warning("OAuth state mismatch — possible CSRF, aborting")
+        raise ValueError("Authorization state did not match; start the login again.")
+    if not code:
+        raise ValueError("No authorization code was provided.")
+    exchange_data = json.dumps({
+        "grant_type": "authorization_code", "client_id": _OAUTH_CLIENT_ID, "code": code,
+        "state": received_state or expected_state, "redirect_uri": _OAUTH_REDIRECT_URI,
+        "code_verifier": verifier,
+    }).encode()
+    result = _post_oauth_token(exchange_data, content_type="application/json", timeout=15, what="exchange")
+    if not result.get("access_token"):
+        raise ValueError("The authorization code was rejected (no access token returned).")
+    return _oauth_token_state(result)
+
+
+def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
+    """Run Hermes-native OAuth PKCE flow and return credential state."""
+    import webbrowser
+    begun = begin_hermes_oauth_pure()
+    auth_url, verifier, oauth_state = begun["authorize_url"], begun["verifier"], begun["state"]
     print("\n".join([
         "", "Authorize Hermes with your Claude Pro/Max subscription.", "",
         "╭─ Claude Pro/Max Authorization ────────────────────╮",
@@ -532,24 +574,14 @@ def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
     if not auth_code:
         print("No code entered.")
         return None
-    splits = auth_code.split("#")
-    code, received_state = splits[0], (splits[1] if len(splits) > 1 else "")
-    if received_state != oauth_state:  # CSRF guard (RFC 6749 §10.12)
-        logger.warning("OAuth state mismatch — possible CSRF, aborting")
-        return None
     try:
-        exchange_data = json.dumps({
-            "grant_type": "authorization_code", "client_id": _OAUTH_CLIENT_ID, "code": code, "state": received_state,
-            "redirect_uri": _OAUTH_REDIRECT_URI, "code_verifier": verifier,
-        }).encode()
-        result = _post_oauth_token(exchange_data, content_type="application/json", timeout=15, what="exchange")
+        return complete_hermes_oauth_pure(auth_code, verifier, oauth_state)
+    except ValueError as e:
+        print(str(e))
+        return None
     except Exception as e:
         print(f"Token exchange failed: {e}")
         return None
-    if not result.get("access_token"):
-        print("No access token in response.")
-        return None
-    return _oauth_token_state(result)
 
 
 def read_hermes_oauth_credentials() -> Optional[Dict[str, Any]]:

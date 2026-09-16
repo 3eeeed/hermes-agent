@@ -214,6 +214,59 @@ def _codex_exchange_tokens(httpx, code_resp: Dict[str, Any]) -> Dict[str, str]:
     return {"access_token": tokens.get("access_token", ""), "refresh_token": tokens.get("refresh_token", "")}
 
 
+def _add_pool_account(provider: str, tokens: Dict[str, str]) -> None:
+    """Add an independent pool entry for a newly authorized account.
+
+    Mirrors ``hermes auth add <provider>`` (auth_commands._add_credential) rather
+    than the singleton save: a ``manual:device_code`` entry refreshes from its own
+    token pair and needs no singleton shadow, so N accounts coexist. Going through the
+    singleton instead made a second login overwrite the first (#39236).
+    """
+    import uuid
+
+    from agent.credential_pool import (
+        AUTH_TYPE_OAUTH, SOURCE_MANUAL_DEVICE_CODE, PooledCredential, label_from_token, load_pool,
+    )
+    from hermes_cli.auth import DEFAULT_CODEX_BASE_URL, _utc_now_z, mark_provider_active_if_unset
+
+    pool = load_pool(provider)
+    # Re-adding is an explicit re-engagement signal: a source suppressed by an
+    # earlier removal must stop blocking the seed path (same as `hermes auth add`).
+    try:
+        from hermes_cli.auth import _load_auth_store, unsuppress_credential_source
+
+        for src in list((_load_auth_store().get("suppressed_sources", {}) or {}).get(provider, []) or []):
+            unsuppress_credential_source(provider, src)
+    except Exception:
+        _log.exception("unsuppress before %s pool add failed (non-fatal)", provider)
+
+    access_token = tokens.get("access_token", "")
+    first_credential = not pool.entries()
+    entry = pool.add_entry(PooledCredential(
+        provider=provider,
+        id=uuid.uuid4().hex[:6],
+        label=label_from_token(access_token, f"{provider}-oauth-{len(pool.entries()) + 1}"),
+        auth_type=AUTH_TYPE_OAUTH,
+        priority=0,
+        source=SOURCE_MANUAL_DEVICE_CODE,
+        access_token=access_token,
+        refresh_token=tokens.get("refresh_token"),
+        # Codex talks to its own gateway; Anthropic uses the adapter default.
+        base_url=DEFAULT_CODEX_BASE_URL if provider == "openai-codex" else None,
+        last_refresh=_utc_now_z(),
+    ))
+    # The first credential becomes the active provider (what the singleton save did
+    # implicitly); later adds leave the user's active provider alone.
+    if first_credential:
+        mark_provider_active_if_unset(provider)
+    _log.info("oauth: %s account added to pool (entry=%s)", provider, entry.id)
+
+
+def _add_codex_pool_account(tokens: Dict[str, str]) -> None:
+    """Back-compat shim for the Codex device-code worker."""
+    _add_pool_account("openai-codex", tokens)
+
+
 def _codex_full_login_worker(session_id: str) -> None:
     """Run the complete OpenAI Codex device-code flow (see comment above)."""
     try:
@@ -246,6 +299,12 @@ def _codex_full_login_worker(session_id: str) -> None:
         tokens = _codex_exchange_tokens(httpx, code_resp)
         from hermes_cli.auth import _save_codex_tokens
 
+        # "Add account" must NOT go through the singleton save path: that path
+        # mirrors ONE grant, so a second dashboard login collapsed both accounts
+        # into the latest one (#39236). Adding a self-contained pool entry is the
+        # same thing `hermes auth add openai-codex` does.
+        add_account = bool(sess.get("add_account"))
+
         # The cancellation check and the save are one atomic critical section
         # under the lock cancel_oauth_session() uses; otherwise DELETE could
         # flip "cancelled" between the check and the save and tokens would be
@@ -254,7 +313,10 @@ def _codex_full_login_worker(session_id: str) -> None:
             if _codex_cancelled(sess, session_id, " before token save"):
                 return
             with _profile_scope(session_profile):
-                _save_codex_tokens(tokens)
+                if add_account:
+                    _add_codex_pool_account(tokens)
+                else:
+                    _save_codex_tokens(tokens)
             sess["status"] = "approved"
         _log.info("oauth/device: openai-codex login completed (session=%s)", session_id)
     except Exception as e:
@@ -421,11 +483,14 @@ async def _start_nous_device_code(profile: Optional[str]) -> Dict[str, Any]:
     }
 
 
-async def _start_codex_device_code(profile: Optional[str]) -> Dict[str, Any]:
+async def _start_codex_device_code(profile: Optional[str], add_account: bool = False) -> Dict[str, Any]:
     # The full Codex helper polls inline, so it runs in a worker thread and
     # proxies user_code + verification_url back via the session dict; block
     # briefly until the worker has populated the user_code, OR errored.
-    sid, _ = _new_oauth_session("openai-codex", "device_code", profile=profile)
+    sid, sess = _new_oauth_session("openai-codex", "device_code", profile=profile)
+    # Set before the poller starts: the worker reads this at save time to decide
+    # between appending a pool entry and replacing the single stored login.
+    sess["add_account"] = add_account
     _start_poller(_codex_full_login_worker, sid, prefix="oauth-codex")
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -504,11 +569,15 @@ _DEVICE_CODE_STARTERS = {
 }
 
 
-async def _start_device_code_flow(provider_id: str, profile: Optional[str] = None) -> Dict[str, Any]:
+async def _start_device_code_flow(
+    provider_id: str, profile: Optional[str] = None, add_account: bool = False,
+) -> Dict[str, Any]:
     """Hit the provider's device-auth endpoint, spawn its poller, return the display fields."""
     starter = _DEVICE_CODE_STARTERS.get(provider_id)
     if starter is None:
         raise HTTPException(status_code=400, detail=f"Provider {provider_id} does not support device-code flow")
+    if add_account:
+        return await starter(profile, add_account=True)
     return await starter(profile)
 
 
@@ -671,8 +740,14 @@ def _validate_oauth_profile(profile: Optional[str]) -> str:
 
 
 @router.post("/api/providers/oauth/{provider_id}/start")
-async def start_oauth_login(provider_id: str, request: Request, profile: Optional[str] = None):
-    """Initiate an OAuth login flow. Token-protected."""
+async def start_oauth_login(
+    provider_id: str, request: Request, profile: Optional[str] = None, add_account: bool = False,
+):
+    """Initiate an OAuth login flow. Token-protected.
+
+    ``add_account=true`` keeps existing credentials and appends the new grant as a
+    separate pool entry, instead of replacing the provider's single stored login.
+    """
     _require_token(request)
     _gc_oauth_sessions()
     _validate_oauth_profile(profile)
@@ -681,9 +756,15 @@ async def start_oauth_login(provider_id: str, request: Request, profile: Optiona
         raise HTTPException(status_code=400, detail=f"Unknown provider {provider_id}")
     if catalog_entry["flow"] == "external":
         raise HTTPException(400, f"{provider_id} uses an external CLI; run `{catalog_entry['cli_command']}` manually")
+    if add_account and provider_id not in ("openai-codex", "anthropic"):
+        raise HTTPException(400, f"{provider_id} does not support multiple accounts yet")
     try:
+        if catalog_entry["flow"] == "pkce":
+            return await asyncio.to_thread(
+                _start_anthropic_pkce, profile=profile, add_account=add_account
+            )
         if catalog_entry["flow"] == "device_code":
-            return await _start_device_code_flow(provider_id, profile=profile)
+            return await _start_device_code_flow(provider_id, profile=profile, add_account=add_account)
     except HTTPException:
         raise
     except Exception as e:
@@ -692,13 +773,86 @@ async def start_oauth_login(provider_id: str, request: Request, profile: Optiona
     raise HTTPException(status_code=400, detail="Unsupported flow")
 
 
+_ANTHROPIC_PKCE_EXPIRES_IN = 600
+
+
+def _start_anthropic_pkce(*, profile: Optional[str] = None, add_account: bool = False) -> Dict[str, Any]:
+    """Begin the Anthropic PKCE grant and stash its secrets server-side.
+
+    Anthropic issues no device code, so the user approves in a browser and pastes
+    ``code#state`` back into ``/submit``. The verifier and state are the secret
+    half of the grant and are deliberately NOT returned to the caller: leaking the
+    verifier (as `state`) was one of the bugs that got the previous dashboard flow
+    removed in 0099f250c2.
+    """
+    from agent.anthropic_credentials import begin_hermes_oauth_pure
+
+    begun = begin_hermes_oauth_pure()
+    sid = secrets.token_hex(16)
+    with _oauth_sessions_lock:
+        _oauth_sessions[sid] = {
+            "provider": "anthropic", "flow": "pkce", "status": "pending",
+            "verifier": begun["verifier"], "state": begun["state"],
+            "profile": _oauth_profile_name(profile), "add_account": bool(add_account),
+            "created_at": time.time(),
+        }
+    _log.info("oauth/pkce: anthropic login started (add_account=%s)", bool(add_account))
+    return {
+        "session_id": sid, "provider": "anthropic", "flow": "pkce",
+        # `auth_url` + `expires_in` match the existing OAuthStartResponse pkce
+        # variant the desktop client already types against.
+        "auth_url": begun["authorize_url"],
+        "expires_in": _ANTHROPIC_PKCE_EXPIRES_IN,
+        "profile": _oauth_profile_name(profile),
+        "instructions": "Approve in the browser, then paste the code shown by Anthropic.",
+    }
+
+
 @router.post("/api/providers/oauth/{provider_id}/submit")
 async def submit_oauth_code(
     provider_id: str, body: OAuthSubmitBody, request: Request, profile: Optional[str] = None,
 ):
     """Submit the auth code for PKCE flows. Token-protected."""
     _require_token(request)
-    raise HTTPException(status_code=400, detail=f"submit not supported for {provider_id}")
+    if provider_id != "anthropic":
+        raise HTTPException(status_code=400, detail=f"submit not supported for {provider_id}")
+
+    with _oauth_sessions_lock:
+        sess = _oauth_sessions.get(body.session_id)
+        if not sess:
+            raise HTTPException(status_code=404, detail="Unknown or expired login session")
+        # A session is bound to the provider that created it: a code obtained for
+        # one provider must never be redeemed against another's pool.
+        if sess.get("provider") != provider_id:
+            raise HTTPException(status_code=400, detail="Session does not belong to this provider")
+        verifier, expected_state = sess.get("verifier", ""), sess.get("state", "")
+        session_profile, add_account = sess.get("profile"), bool(sess.get("add_account"))
+
+    def _run() -> Dict[str, Any]:
+        from agent.anthropic_credentials import complete_hermes_oauth_pure
+
+        try:
+            tokens = complete_hermes_oauth_pure(body.code, verifier, expected_state)
+        except ValueError as exc:
+            # Wrong/expired/replayed code. The session is dropped so a failed code
+            # cannot be retried against the same verifier.
+            with _oauth_sessions_lock:
+                _oauth_sessions.pop(body.session_id, None)
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception:
+            _log.exception("anthropic pkce exchange failed")
+            raise HTTPException(status_code=502, detail="Token exchange failed; try again.")
+
+        with _profile_scope(session_profile):
+            # Both paths append a pool entry: the generic `hermes auth add anthropic`
+            # path persists the same way, and the pool is what the runtime reads.
+            # A first login simply lands as the pool's only (and active) entry.
+            _add_pool_account("anthropic", tokens)
+        with _oauth_sessions_lock:
+            _oauth_sessions.pop(body.session_id, None)
+        return {"status": "success", "provider": "anthropic", "profile": session_profile}
+
+    return await asyncio.to_thread(_run)
 
 
 @router.get("/api/providers/oauth/{provider_id}/poll/{session_id}")
