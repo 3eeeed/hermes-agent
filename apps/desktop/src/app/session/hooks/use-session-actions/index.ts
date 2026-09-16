@@ -26,6 +26,7 @@ import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { recoverInFlightTurnJournal } from '@/lib/inflight-turn-journal'
 import { setSessionYolo } from '@/lib/yolo-session'
 import { $clarifyRequests } from '@/store/clarify'
+import { clearDraftCodexCredentialSelection } from '@/store/codex-credential-selection'
 import { migrateSessionDraft } from '@/store/composer'
 import { clearQueuedPrompts, migrateQueuedPrompts } from '@/store/composer-queue'
 import { $connectionRequests } from '@/store/connection-request'
@@ -474,6 +475,9 @@ export function useSessionActions({
         : undefined
 
       resetViewSync()
+      // A Codex account picked for an abandoned draft must never become the
+      // default for the next chat.
+      clearDraftCodexCredentialSelection()
       busyRef.current = false
       setBusy(false)
       setAwaitingResponse(false)

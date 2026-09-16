@@ -5,6 +5,11 @@ import type {
   AudioTranscriptionResponse,
   AudioTtsLeaseResponse,
   BackendUpdateCheckResponse,
+  CodexSessionCredentialSelection,
+  CodexSessionCredentialSelectionState,
+  CredentialPoolDeleteResponse,
+  CredentialPoolResponse,
+  CredentialPoolUsageResponse,
   CuratorStatusResponse,
   DebugShareResponse,
   ElevenLabsVoicesResponse,
@@ -141,6 +146,100 @@ export function restartGateway(): Promise<ActionResponse> {
     path: '/api/gateway/restart',
     method: 'POST'
   })
+}
+
+/** Metadata only: labels and health for configured credential-pool entries.
+ * The backend redacts access and refresh tokens before answering. */
+export function getCredentialPool(profile?: null | string): Promise<CredentialPoolResponse> {
+  return hermesApi<CredentialPoolResponse>({
+    ...profileScoped(profile),
+    path: '/api/credentials/pool'
+  })
+}
+
+/** Providers whose accounts the statusbar menu manages. The backend enforces the
+ * same allowlist; these are fixed literals, never user input. */
+export type PooledAccountProvider = 'anthropic' | 'openai-codex'
+
+/** Quota data is calculated in the backend for each saved account.
+ * The response contains display metadata only, never account credentials. */
+export function getCredentialPoolUsage(
+  provider: PooledAccountProvider,
+  profile?: null | string
+): Promise<CredentialPoolUsageResponse> {
+  return hermesApi<CredentialPoolUsageResponse>({
+    ...profileScoped(profile),
+    path: `/api/credentials/pool/${provider}/usage`
+  })
+}
+
+export function getCodexCredentialPoolUsage(profile?: null | string): Promise<CredentialPoolUsageResponse> {
+  return getCredentialPoolUsage('openai-codex', profile)
+}
+
+export function setPoolSessionCredentialSelection(
+  provider: PooledAccountProvider,
+  sessionId: string,
+  credentialId: string,
+  profile?: null | string
+): Promise<CodexSessionCredentialSelection> {
+  return hermesApi<CodexSessionCredentialSelection>({
+    ...profileScoped(profile),
+    body: {
+      credential_id: credentialId,
+      session_id: sessionId,
+      ...(profile ? { profile } : {})
+    },
+    method: 'PUT',
+    path: `/api/credentials/pool/${provider}/session-selection`
+  })
+}
+
+export function setCodexSessionCredentialSelection(
+  sessionId: string,
+  credentialId: string,
+  profile?: null | string
+): Promise<CodexSessionCredentialSelection> {
+  return setPoolSessionCredentialSelection('openai-codex', sessionId, credentialId, profile)
+}
+
+/** Reads the saved account preference for a chat without exposing credentials. */
+export function getPoolSessionCredentialSelection(
+  provider: PooledAccountProvider,
+  sessionId: string,
+  profile?: null | string
+): Promise<CodexSessionCredentialSelectionState> {
+  return hermesApi<CodexSessionCredentialSelectionState>({
+    ...profileScoped(profile),
+    path: `/api/credentials/pool/${provider}/session-selection?session_id=${encodeURIComponent(sessionId)}`
+  })
+}
+
+export function getCodexSessionCredentialSelection(
+  sessionId: string,
+  profile?: null | string
+): Promise<CodexSessionCredentialSelectionState> {
+  return getPoolSessionCredentialSelection('openai-codex', sessionId, profile)
+}
+
+/** Removes a saved account by opaque pool id. Credentials never cross this API. */
+export function deletePoolCredential(
+  provider: PooledAccountProvider,
+  credentialId: string,
+  profile?: null | string
+): Promise<CredentialPoolDeleteResponse> {
+  return hermesApi<CredentialPoolDeleteResponse>({
+    ...profileScoped(profile),
+    method: 'DELETE',
+    path: `/api/credentials/pool/${provider}/entries/${encodeURIComponent(credentialId)}`
+  })
+}
+
+export function deleteCodexCredential(
+  credentialId: string,
+  profile?: null | string
+): Promise<CredentialPoolDeleteResponse> {
+  return deletePoolCredential('openai-codex', credentialId, profile)
 }
 
 export function updateHermes(): Promise<ActionResponse> {
