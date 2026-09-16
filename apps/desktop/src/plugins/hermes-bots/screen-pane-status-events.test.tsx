@@ -25,9 +25,11 @@ vi.mock('@hermes/plugin-sdk', async () => {
     host: { onEvent: onGatewayEvent }
   }
 })
-vi.mock('./routing', () => ({
-  botConnectionRoute: () => ({ connectionId: 'host-a', profile: 'ops', targetProfile: 'ops' })
-}))
+vi.mock('./routing', () => {
+  const route = { connectionId: 'host-a', mode: 'remote', profile: 'ops', targetProfile: 'ops' }
+
+  return { botConnectionRoute: () => route, resolveBotConnectionRoute: () => ({ status: 'resolved', route }) }
+})
 vi.mock('./data', () => ({ botSelectionKey: (bot: RosterRow) => bot.name }))
 vi.mock('./i18n', () => ({
   useBots: () => ({

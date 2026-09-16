@@ -13,7 +13,7 @@
 import { host, resolveSiblingWsUrl } from '@hermes/plugin-sdk'
 import type { DisplayLease, PluginProfileRoute, RpcEvent } from '@hermes/plugin-sdk'
 
-import { botConnectionRoute } from './routing'
+import { resolveBotConnectionRoute } from './routing'
 import type { RosterRow } from './types'
 
 // Wire shapes come from the generated contract (Python is the source: `tui_gateway/contracts/display.py`).
@@ -59,9 +59,20 @@ export function isDisplayUnavailable(error: unknown): boolean {
   return message.includes('method not found') || message.includes('method-not-found')
 }
 
-/** Bare-profile fallback so a v1 local bot (no registry route) still resolves. */
-export function botScreenRoute(bot: RosterRow): PluginProfileRoute | string {
-  return botConnectionRoute(bot) ?? bot.name
+/**
+ * Where `display.*` for `bot` goes. Passive resolution (the typed resolver, never
+ * the throwing dispatch wrapper): a source-scoped row whose connection was deleted
+ * is a settled "no screen" (null), and a v1 local bot with no registry route falls
+ * back to its bare profile name.
+ */
+export function botScreenRoute(bot: RosterRow): PluginProfileRoute | string | null {
+  const resolved = resolveBotConnectionRoute(bot)
+
+  if (resolved.status === 'resolved') {
+    return resolved.route
+  }
+
+  return resolved.status === 'not_scoped' ? bot.name : null
 }
 
 /**
@@ -76,14 +87,28 @@ export function isEventForBotScreen(bot: RosterRow, event: RpcEvent, profileKey:
     return false
   }
 
-  const expected = botConnectionRoute(bot)?.connectionId ?? null
+  // Only now resolve the route: this runs for every display.* event, and an orphaned row (its
+  // connection deleted) owns no screen rather than being an error to throw from a listener.
+  const resolved = resolveBotConnectionRoute(bot)
+
+  if (resolved.status === 'owner_removed') {
+    return false
+  }
+
+  const expected = resolved.route?.connectionId ?? null
   const actual = event.connectionId ?? null
 
   return expected === actual || (expected === 'local' && actual === null)
 }
 
 export function displayRequest<T>(bot: RosterRow, method: string, params: Record<string, unknown> = {}): Promise<T> {
-  return host.requestProfile<T>(botScreenRoute(bot), method, params)
+  const route = botScreenRoute(bot)
+
+  if (route === null) {
+    return Promise.reject(new Error(`Bot ${bot.name} has no connection owner`))
+  }
+
+  return host.requestProfile<T>(route, method, params)
 }
 
 /**
@@ -96,12 +121,14 @@ export function displayRequest<T>(bot: RosterRow, method: string, params: Record
 export async function retainBotScreen(bot: RosterRow): Promise<() => void> {
   const noop = () => undefined
 
-  if (typeof host.retainProfile !== 'function') {
+  const route = botScreenRoute(bot)
+
+  if (typeof host.retainProfile !== 'function' || route === null) {
     return noop
   }
 
   try {
-    const release = await host.retainProfile(botScreenRoute(bot))
+    const release = await host.retainProfile(route)
 
     return typeof release === 'function' ? release : noop
   } catch {
@@ -115,7 +142,13 @@ export async function retainBotScreen(bot: RosterRow): Promise<() => void> {
  * bridge and the single-use display ticket attached.
  */
 export async function resolveScreenWsUrl(bot: RosterRow, ticket: string): Promise<string> {
-  const route = botConnectionRoute(bot)
+  const resolved = resolveBotConnectionRoute(bot)
+
+  if (resolved.status === 'owner_removed') {
+    throw new Error(`Bot ${bot.name} has no connection owner`)
+  }
+
+  const route = resolved.route
 
   // The /api/ws credential authenticated the RPC that minted the display ticket;
   // the bridge authenticates on the ticket alone, so the gateway credential is

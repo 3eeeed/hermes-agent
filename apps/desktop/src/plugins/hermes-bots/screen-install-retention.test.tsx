@@ -38,9 +38,11 @@ vi.mock('@hermes/plugin-sdk', async () => {
     }
   }
 })
-vi.mock('./routing', () => ({
-  botConnectionRoute: () => ({ connectionId: 'host-a', profile: 'ops', targetProfile: 'ops' })
-}))
+vi.mock('./routing', () => {
+  const route = { connectionId: 'host-a', mode: 'remote', profile: 'ops', targetProfile: 'ops' }
+
+  return { botConnectionRoute: () => route, resolveBotConnectionRoute: () => ({ status: 'resolved', route }) }
+})
 vi.mock('./i18n', () => ({
   useBots: () => ({
     screen: {
