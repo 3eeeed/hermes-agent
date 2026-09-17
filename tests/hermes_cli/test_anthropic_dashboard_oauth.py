@@ -94,6 +94,37 @@ def test_each_start_uses_a_fresh_verifier_and_state(_isolated_home):
     assert first["state"] != second["state"]
 
 
+def test_restarting_the_add_flow_retires_the_previous_session(_isolated_home):
+    """Pressing "+" again must leave exactly one redeemable session.
+
+    Every start mints a new state, so a user who clicks "+" twice ends up with two
+    live authorize links. Approving the older one then pasting its code fails the
+    CSRF check against the newer session -- the user sees "Authorization state did
+    not match" for a code they legitimately obtained. The superseded session is
+    retired so only the link the UI is actually showing can still be redeemed.
+    """
+    first = _start(add_account=True)["session_id"]
+    second = _start(add_account=True)["session_id"]
+
+    assert second != first
+    assert _web_server_oauth._oauth_sessions.get(first) is None, "superseded session still redeemable"
+    assert _web_server_oauth._oauth_sessions.get(second) is not None, "current session must stay live"
+
+
+def test_restarting_does_not_disturb_another_providers_session(_isolated_home):
+    """Retirement is scoped to the provider: an unrelated login must survive."""
+    import time
+
+    with _web_server_oauth._oauth_sessions_lock:
+        _web_server_oauth._oauth_sessions["codex-sid"] = {
+            "provider": "openai-codex", "created_at": time.time(), "flow": "device_code",
+        }
+
+    _start(add_account=True)
+
+    assert _web_server_oauth._oauth_sessions.get("codex-sid") is not None, "unrelated provider was retired"
+
+
 def test_submit_exchanges_with_the_server_side_verifier_and_saves(_isolated_home, monkeypatch):
     from agent.credential_pool import load_pool
 
