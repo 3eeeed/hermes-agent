@@ -790,6 +790,20 @@ def _start_anthropic_pkce(*, profile: Optional[str] = None, add_account: bool = 
     begun = begin_hermes_oauth_pure()
     sid = secrets.token_hex(16)
     with _oauth_sessions_lock:
+        # Retire this provider's earlier pending PKCE sessions. Each start mints a
+        # new state, so a user who clicks "+" twice holds two live authorize links;
+        # approving the older one and pasting its code then fails the CSRF check
+        # against the newer session ("Authorization state did not match") for a code
+        # they legitimately obtained. Keeping exactly one redeemable session makes
+        # the last link shown the only one that works. Scoped to this provider and
+        # to pending PKCE rows so unrelated logins are untouched.
+        for stale in [
+            s for s, sess in _oauth_sessions.items()
+            if sess.get("provider") == "anthropic"
+            and sess.get("flow") == "pkce"
+            and sess.get("status") == "pending"
+        ]:
+            _oauth_sessions.pop(stale, None)
         _oauth_sessions[sid] = {
             "provider": "anthropic", "flow": "pkce", "status": "pending",
             "verifier": begun["verifier"], "state": begun["state"],
