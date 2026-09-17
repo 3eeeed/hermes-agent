@@ -399,7 +399,12 @@ async def list_credential_pool_usage(provider: str):
     _one, _entries = _pool_usage_payload(provider)
     entries = await asyncio.to_thread(_entries)
     usage = await asyncio.gather(*(asyncio.to_thread(_one, entry) for entry in entries))
-    return {"provider": provider, "entries": usage}
+    # Reported even when the pool is empty. Anthropic legitimately starts at
+    # zero: Hermes borrows the ambient Claude Code credential, and the pool
+    # refuses to adopt it until the user explicitly configures the provider
+    # (PR #4210). The desktop menu needs to render its add button in that
+    # state, otherwise the first account can never be added from the UI.
+    return {"provider": provider, "entries": usage, "can_add_accounts": True}
 
 
 @router.put("/api/credentials/pool/{provider}/session-selection")

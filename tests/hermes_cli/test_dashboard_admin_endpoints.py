@@ -251,6 +251,34 @@ class TestCredentialPoolEndpoints:
         ]
         assert "must-not-cross-api" not in response.text
 
+    def test_usage_reports_whether_accounts_can_be_added_when_the_pool_is_empty(self, monkeypatch):
+        """An empty pool must still say that accounts CAN be added.
+
+        Anthropic starts with zero pool entries: Hermes borrows the ambient
+        Claude Code credential and `_seed_anthropic_singletons` deliberately
+        refuses to adopt it until the user explicitly configures the provider.
+        The account menu keys off this endpoint, so without a signal here it
+        renders nothing — and the only way to add the first account is a button
+        inside that menu. That is an unbreakable bootstrap loop.
+        """
+        import agent.credential_pool as credential_pool
+
+        monkeypatch.setattr(
+            credential_pool,
+            "load_pool",
+            lambda provider: type("Pool", (), {"entries": lambda self: []})(),
+        )
+
+        response = self.client.get("/api/credentials/pool/anthropic/usage")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["entries"] == []
+        assert body["can_add_accounts"] is True, (
+            "an empty pool reported no way to add an account: the desktop menu "
+            "hides itself and the user can never reach the add button"
+        )
+
     def test_codex_session_selection_persists_only_redacted_pool_id(self, monkeypatch):
         import agent.credential_pool as credential_pool
         import hermes_cli.web_server_sessions as web_sessions

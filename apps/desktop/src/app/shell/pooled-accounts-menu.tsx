@@ -50,7 +50,12 @@ export function PooledAccountsMenu({
                 <span className="font-semibold text-primary">{activeLabel || 'the selected account'}</span>.
               </>
             )
-          : 'Choose an account for this chat.'}
+          : accounts.length
+            ? 'Choose an account for this chat.'
+            // No saved accounts yet. Hermes may still be running on a
+            // credential it borrowed from an external client (Claude Code),
+            // which it will not adopt without an explicit sign-in here.
+            : 'No accounts saved yet. Add one to manage it from this menu.'}
       </div>
 
       {accounts.map((entry, index) => {
