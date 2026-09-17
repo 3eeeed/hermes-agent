@@ -136,6 +136,10 @@ export interface CredentialPoolUsageEntry {
 }
 
 export interface CredentialPoolUsageResponse {
+  /** False only when the provider cannot accept new accounts at all. Reported
+   *  independently of `entries` so the desktop menu can offer its add button
+   *  while the pool is still empty. */
+  can_add_accounts?: boolean
   entries: CredentialPoolUsageEntry[]
   provider: string
 }

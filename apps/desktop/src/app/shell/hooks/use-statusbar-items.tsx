@@ -663,13 +663,18 @@ export function useStatusbarItems({
         { controller: codex, id: 'codex-accounts', short: 'Codex', title: 'OpenAI Codex accounts', toggle: 'GPT accounts' },
         { controller: anthropic, id: 'anthropic-accounts', short: 'Claude', title: 'Anthropic accounts', toggle: 'Claude accounts' }
       ] as const).flatMap(({ controller, id, short, title, toggle }) =>
-        controller.accounts.length
+        controller.accounts.length || controller.canAddAccounts
           ? [{
               icon: <Hash className="size-3" />,
               id,
               label: controller.activeCredentialId
                 ? `${short} \u00b7 ${(controller.accounts.find(entry => entry.id === controller.activeCredentialId)?.label ?? '').trim() || 'Active'}`
-                : controller.accounts.map((entry, index) => controller.labelFor(entry, index)).join(' \u00b7 '),
+                // With no saved accounts the join would render an empty label,
+                // leaving an invisible statusbar item. Name the provider so the
+                // menu holding the add button is reachable.
+                : controller.accounts.length
+                  ? controller.accounts.map((entry, index) => controller.labelFor(entry, index)).join(' \u00b7 ')
+                  : `${short} \u00b7 Add account`,
               menuAlign: 'end' as const,
               menuClassName: 'w-80 border-(--ui-stroke-secondary) p-2',
               menuContent: <PooledAccountsMenu controller={controller} focusedStoredSessionId={focusedStoredSessionId} />,

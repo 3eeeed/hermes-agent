@@ -22,6 +22,8 @@ export interface PooledAccountAddSession {
 
 export interface PooledAccountsController {
   accounts: readonly CredentialPoolEntry[]
+  /** Whether a new account can be added, independent of how many exist. */
+  canAddAccounts: boolean
   activeCredentialId: null | string
   addError: null | string
   addSession: PooledAccountAddSession | null
@@ -83,13 +85,19 @@ export function usePooledAccounts(options: {
   )
 
   const accountUsage = useQuery({
-    enabled: enabled && accounts.length > 0,
+    // Queried even with an empty pool: the response also reports whether
+    // accounts can be added, which is how a provider with no entries yet
+    // (Anthropic, before its first explicit sign-in) still offers its add
+    // button instead of hiding the menu that contains it.
+    enabled,
     queryFn: () => getCredentialPoolUsage(provider, activeGatewayProfile || undefined),
     queryKey: ['credential-pool-usage', provider, activeGatewayProfile],
     refetchInterval: 120_000,
     retry: false,
     staleTime: 90_000
   })
+
+  const canAddAccounts = accountUsage.data?.can_add_accounts ?? false
 
   const usageById = useMemo(
     () => new Map((accountUsage.data?.entries ?? []).map(entry => [entry.id, entry])),
@@ -254,6 +262,7 @@ export function usePooledAccounts(options: {
     activeCredentialId,
     addError,
     addSession,
+    canAddAccounts,
     cancelAdd,
     confirmDelete,
     deleteCandidate,
