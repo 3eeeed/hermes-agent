@@ -279,6 +279,63 @@ class TestCredentialPoolEndpoints:
             "hides itself and the user can never reach the add button"
         )
 
+    def test_codex_usage_and_listing_expose_the_real_account_email(self, monkeypatch):
+        """The account's email (from the token's own claims) must reach both
+        the plain pool listing and the usage endpoint, independent of label.
+
+        Two entries can carry an identical, user-chosen label ("1", "2",
+        "batal" are just display names) -- the email decoded from each
+        token's own OAuth claims is the only thing that tells them apart,
+        so it must be present in the API response, not just internal state.
+        """
+        import base64
+        import json as _json
+        from datetime import datetime, timezone
+
+        import agent.account_usage as account_usage
+        import agent.credential_pool as credential_pool
+        from agent.account_usage import AccountUsageSnapshot
+        from agent.credential_pool import PooledCredential
+
+        def _fake_jwt(email):
+            def _b64(obj):
+                return base64.urlsafe_b64encode(_json.dumps(obj).encode()).decode().rstrip("=")
+            header = _b64({"alg": "none"})
+            payload = _b64({"https://api.openai.com/profile": {"email": email}})
+            return f"{header}.{payload}.sig"
+
+        entry_a = PooledCredential(
+            provider="openai-codex", id="acct-1", label="1", auth_type="oauth",
+            priority=0, source="test", access_token=_fake_jwt("first@example.com"),
+        )
+        entry_b = PooledCredential(
+            provider="openai-codex", id="acct-2", label="1", auth_type="oauth",
+            priority=1, source="test", access_token=_fake_jwt("second@example.com"),
+        )
+        monkeypatch.setattr(
+            credential_pool, "load_pool",
+            lambda provider: type("Pool", (), {"entries": lambda self: [entry_a, entry_b]})(),
+        )
+        import hermes_cli.auth as auth_mod
+        monkeypatch.setattr(auth_mod, "read_credential_pool", lambda: {"openai-codex": [{}, {}]})
+        monkeypatch.setattr(
+            account_usage, "fetch_account_usage",
+            lambda provider, **kwargs: AccountUsageSnapshot(
+                provider=provider, source="usage_api", fetched_at=datetime.now(timezone.utc), plan="Pro",
+            ),
+        )
+
+        listing = self.client.get("/api/credentials/pool").json()
+        codex_entries = next(p for p in listing["providers"] if p["provider"] == "openai-codex")["entries"]
+        assert {e["id"]: e["email"] for e in codex_entries} == {
+            "acct-1": "first@example.com", "acct-2": "second@example.com",
+        }
+
+        usage = self.client.get("/api/credentials/pool/openai-codex/usage").json()
+        assert {e["id"]: e["email"] for e in usage["entries"]} == {
+            "acct-1": "first@example.com", "acct-2": "second@example.com",
+        }
+
     def test_codex_session_selection_persists_only_redacted_pool_id(self, monkeypatch):
         import agent.credential_pool as credential_pool
         import hermes_cli.web_server_sessions as web_sessions

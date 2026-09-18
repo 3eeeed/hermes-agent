@@ -118,3 +118,19 @@ def test_pin_for_a_different_provider_is_ignored():
         "anthropic", [entry], {"openai_codex_credential_id": "shared-id"}
     )
     assert swapped == [], "a Codex pin leaked into an Anthropic session"
+
+
+def test_pinned_credential_id_is_remembered_on_the_agent():
+    """The pin guard in recover_with_credential_pool reads this attribute to refuse
+    an auto-rotation away from the user's explicit choice; wiring must set it."""
+    entry = types.SimpleNamespace(id="anth-2")
+    agent, _db, _swapped = _wire(
+        "anthropic", [entry], {"anthropic_credential_id": "anth-2"}
+    )
+    assert agent._session_pinned_credential_id == "anth-2"
+
+
+def test_no_pin_clears_the_remembered_credential_id():
+    entry = types.SimpleNamespace(id="anth-1")
+    agent, _db, _swapped = _wire("anthropic", [entry], {})
+    assert agent._session_pinned_credential_id is None

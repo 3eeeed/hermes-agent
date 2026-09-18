@@ -247,3 +247,92 @@ def test_anthropic_usage_uses_passed_api_key_not_ambient_token(monkeypatch):
     assert seen[0] == "Bearer per-entry-token", (
         f"usage was billed to the wrong account: {seen[0]!r}"
     )
+
+
+# Real shape of a Team account that has a model-scoped weekly cap. Claude's own
+# usage page renders three bars from this: session, "All models", and "Fable".
+_ANTHROPIC_SCOPED_LIMIT_PAYLOAD = {
+    "five_hour": {"utilization": 8.0, "resets_at": "2026-09-17T18:30:00+00:00"},
+    "seven_day": {"utilization": 88.0, "resets_at": "2026-09-17T21:00:00+00:00"},
+    "limits": [
+        {"kind": "session", "group": "session", "percent": 8, "scope": None},
+        {"kind": "weekly_all", "group": "weekly", "percent": 88, "scope": None},
+        {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 100,
+            "resets_at": "2026-09-17T20:59:59+00:00",
+            "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None},
+        },
+    ],
+}
+
+
+def test_anthropic_usage_reports_model_scoped_weekly_cap(monkeypatch):
+    """A per-model cap exists only in ``limits`` and must not be dropped.
+
+    It can be the limit actually throttling the account (100% while the
+    all-models window still reads 88%), so reporting the top-level keys alone
+    tells the user they have headroom they do not have.
+    """
+    monkeypatch.setattr("agent.account_usage._is_oauth_token", lambda tok: True)
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client(_ANTHROPIC_SCOPED_LIMIT_PAYLOAD),
+    )
+
+    snapshot = fetch_account_usage("anthropic", base_url=None, api_key="tok")
+
+    assert snapshot is not None
+    by_label = {window.label: window for window in snapshot.windows}
+    assert "Fable weekly" in by_label, f"model-scoped cap dropped: {sorted(by_label)}"
+    assert by_label["Fable weekly"].used_percent == 100.0
+    assert by_label["Fable weekly"].reset_at is not None
+    # The unscoped entries duplicate the top-level windows and must not double up.
+    assert len(snapshot.windows) == 3
+    assert by_label["Current week"].used_percent == 88.0
+
+
+def test_anthropic_usage_without_scoped_limits_is_unchanged(monkeypatch):
+    """An account with no per-model cap keeps exactly its top-level windows."""
+    monkeypatch.setattr("agent.account_usage._is_oauth_token", lambda tok: True)
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client({
+            "five_hour": {"utilization": 0.25, "resets_at": "2026-01-01T00:00:00Z"},
+            "limits": [{"kind": "session", "group": "session", "percent": 0.25, "scope": None}],
+        }),
+    )
+
+    snapshot = fetch_account_usage("anthropic", base_url=None, api_key="tok")
+
+    assert snapshot is not None
+    assert [window.label for window in snapshot.windows] == ["Current session"]
+    assert snapshot.windows[0].used_percent == 0.25
+
+
+def test_anthropic_usage_formats_minor_unit_spend(monkeypatch):
+    """Anthropic's spend amounts are minor currency units, not whole dollars."""
+    monkeypatch.setattr("agent.account_usage._is_oauth_token", lambda tok: True)
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client({
+            "spend": {
+                "enabled": True,
+                "used": {"amount_minor": 154, "currency": "USD", "exponent": 2},
+                "limit": {"amount_minor": 100, "currency": "USD", "exponent": 2},
+            },
+            "extra_usage": {
+                "is_enabled": True,
+                "used_credits": 154.0,
+                "monthly_limit": 100,
+                "currency": "USD",
+                "decimal_places": 2,
+            },
+        }),
+    )
+
+    snapshot = fetch_account_usage("anthropic", base_url=None, api_key="tok")
+
+    assert snapshot is not None
+    assert snapshot.details == ("Extra usage: 1.54 / 1.00 USD",)

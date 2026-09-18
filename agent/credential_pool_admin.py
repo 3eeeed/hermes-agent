@@ -78,6 +78,32 @@ class CredentialPoolAdminMixin:
             self._persist()
             return self._find(lambda e: e.id == credential_id)
 
+    def rename_entry(self, credential_id: str, label: str) -> Optional[PooledCredential]:
+        """Set an entry's display label, leaving its identity untouched.
+
+        A label is presentation metadata: the id, token pair, source, priority
+        and cooldown all stay as they were, so renaming can never change which
+        account is served or where it sits in the fallback order. Re-seeding
+        keeps the stored label (``_upsert_entry`` skips ``label`` whenever the
+        existing entry already has one), so a rename survives a pool reload.
+
+        Returns None when the target is unknown or the label is blank — a
+        blank label would render as an unnamed row the user cannot identify.
+        """
+        cleaned = str(label or "").strip()
+        if not cleaned:
+            return None
+        with self._lock:
+            entry = self._find(lambda e: e.id == credential_id)
+            if entry is None:
+                return None
+            if entry.label == cleaned:
+                return entry
+            renamed = replace(entry, label=cleaned)
+            self._replace_entry(entry, renamed)
+            self._persist()
+            return renamed
+
     def resolve_target(self, target: Any) -> Tuple[Optional[int], Optional[PooledCredential], Optional[str]]:
         raw = str(target or "").strip()
         if not raw:

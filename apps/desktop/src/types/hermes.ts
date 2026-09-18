@@ -97,6 +97,11 @@ export interface OAuthProvidersResponse {
  * Token material never crosses this boundary. */
 export interface CredentialPoolEntry {
   auth_type: string
+  /** Account email decoded from the OAuth token's own claims, when the
+   *  provider embeds one (Codex). Independent of `label`, which the user can
+   *  freely rename — this is how two identically-labelled rows are told
+   *  apart. Null for providers/tokens with no such claim. */
+  email?: null | string
   id: string
   // Both are Optional[str] on the backend (PooledCredential): an entry that has
   // never recorded a request answers with null, not an empty string.
@@ -127,6 +132,9 @@ export interface CredentialPoolUsageWindow {
 export interface CredentialPoolUsageEntry {
   available: boolean
   details?: string[]
+  /** Account email decoded from the OAuth token, when the provider embeds
+   *  one (Codex). See `CredentialPoolEntry.email`. */
+  email?: null | string
   fetched_at?: string
   id: string
   label: null | string
@@ -147,6 +155,14 @@ export interface CredentialPoolUsageResponse {
 /** Result of removing a saved account. Credential material never appears here. */
 export interface CredentialPoolDeleteResponse {
   count: number
+  ok: boolean
+  provider: string
+}
+
+/** Result of relabelling a saved account. Only presentation metadata changes. */
+export interface CredentialPoolRenameResponse {
+  id: string
+  label: string
   ok: boolean
   provider: string
 }
