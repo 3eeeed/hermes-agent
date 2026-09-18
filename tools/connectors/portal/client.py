@@ -97,7 +97,9 @@ class PortalConnectorClient:
         try:
             response, status = self._request("GET", f"/api/v1/connectors/{slug}/tools", headers=headers)
         except ToolGatewayError as exc:
-            if type(exc) is not ToolGatewayError:
+            # A 404 without the portal's own code is a missing route, not a missing connector.
+            missing_route = isinstance(exc, GatewayUnavailable) and exc.code != "connector_not_found"
+            if type(exc) is not ToolGatewayError and not missing_route:
                 raise
             raise PortalToolsUnavailable(
                 "portal tools unavailable",

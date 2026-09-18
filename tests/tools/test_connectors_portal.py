@@ -82,6 +82,21 @@ def test_portal_client_parses_a_listing_and_sends_one_bounded_authorized_request
     assert transport.requests[0]["timeout"] == DEFAULT_TIMEOUT_SECONDS
 
 
+@pytest.mark.parametrize(
+    ("body", "raised"),
+    [({"error": "connector_not_found"}, GatewayUnavailable), (None, PortalToolsUnavailable)],
+)
+def test_only_the_portals_own_not_found_answer_means_the_connector_is_gone(body, raised):
+    portal_client = PortalConnectorClient(
+        transport=FakeTransport(FakeResponse(404, body)),
+        endpoint_resolver=lambda: "https://portal.example.test",
+        header_provider=lambda _url: {"Authorization": "Bearer fresh-token"},
+    )
+
+    with pytest.raises(raised):
+        portal_client.tools("mail-service")
+
+
 def test_cache_serves_a_fresh_entry_and_revalidates_a_stale_one(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     client = _CacheClient(_listing(), NotModified())
