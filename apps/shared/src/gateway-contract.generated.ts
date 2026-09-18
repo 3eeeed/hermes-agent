@@ -948,7 +948,7 @@ export interface ConnectorsConnectParams {
   connectors: string[]
   reconnect?: boolean
 }
-/** The operation the connect opened (or re-minted on): ``tools/connectors/managed.py`` ``_off_desktop_result`` / ``methods_connectors._reissue``. ``status``/``note`` ride along from the tool result when the call ran through ``manage_connections``. */
+/** ``methods_connectors._reissue`` / ``managed._off_desktop_result``: the operation the connect opened; ``status``/``note`` ride along from the tool result. */
 export interface ConnectorsConnectResult {
   op_id: string
   seq: number
@@ -3938,19 +3938,12 @@ export interface ConnectionUpdatePayload {
   settled_at?: number | null
   settled_by?: ConnectionSettleReason | null
   targets: ConnectionOperationTarget[]
-  owner: SessionOwnerPayload | AccountOwnerPayload
+  owner: SessionOwner | AccountOwner
   target?: string | null
   from?: ConnectionTargetState | null
   to?: ConnectionTargetState | null
   actor?: ConnectionActor | null
   detail?: string | null
-}
-export interface SessionOwnerPayload {
-  type: 'session'
-  session_id: string
-}
-export interface AccountOwnerPayload {
-  type: 'account'
 }
 /** ``tools/connectors/contract.py::Actor``. */
 export type ConnectionActor = 'user' | 'backend_watcher' | 'clock'

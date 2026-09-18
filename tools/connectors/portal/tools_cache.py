@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import time
 from typing import Callable, Literal, Protocol
@@ -59,16 +59,7 @@ def _cached(path) -> ToolsRead | None:
         return None
 
 
-def _write(path, listing: ConnectorToolsListing, fetched_at: float) -> ToolsRead:
-    entry = ToolsRead(
-        connector=listing.connector,
-        toolkit_version=listing.toolkit_version,
-        etag=listing.etag,
-        fetched_at=fetched_at,
-        source="network",
-        stale=False,
-        tools=listing.tools,
-    )
+def _store(path, entry: ToolsRead) -> ToolsRead:
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_json_write(
         path,
@@ -108,37 +99,17 @@ def read_tools(
     except (PortalToolsUnavailable, ToolGatewayError):
         if cached is None:
             raise
-        return ToolsRead(
-            connector=cached.connector,
-            toolkit_version=cached.toolkit_version,
-            etag=cached.etag,
-            fetched_at=cached.fetched_at,
-            source="cache",
-            stale=True,
-            tools=cached.tools,
-        )
+        return replace(cached, stale=True)
     if isinstance(listing, NotModified):
         if cached is None:
             raise PortalToolsUnavailable("portal tools unavailable", code="INVALID_RESPONSE")
-        refreshed = ToolsRead(
-            connector=cached.connector,
-            toolkit_version=cached.toolkit_version,
-            etag=cached.etag,
-            fetched_at=fetched_at,
-            source="revalidated",
-            stale=False,
-            tools=cached.tools,
-        )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_json_write(
-            path,
-            {
-                "etag": refreshed.etag,
-                "toolkit_version": refreshed.toolkit_version,
-                "connector": refreshed.connector,
-                "tools": [tool.model_dump(by_alias=True) for tool in refreshed.tools],
-                "fetched_at": refreshed.fetched_at,
-            },
-        )
-        return refreshed
-    return _write(path, listing, fetched_at)
+        return _store(path, replace(cached, fetched_at=fetched_at, source="revalidated"))
+    return _store(path, ToolsRead(
+        connector=listing.connector,
+        toolkit_version=listing.toolkit_version,
+        etag=listing.etag,
+        fetched_at=fetched_at,
+        source="network",
+        stale=False,
+        tools=listing.tools,
+    ))

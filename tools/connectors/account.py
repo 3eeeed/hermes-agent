@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import contextvars
 import threading
-import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable
 
 from tools.connectors import live
 from tools.connectors import managed
 from tools.connectors.operation import ConnectionOperation, Target
-from tools.connectors.run import run_operation
+from tools.connectors.run import drive_operation
 
 
 _PREPARE_WAIT_SECONDS = 31.0
@@ -23,9 +21,8 @@ _start_lock = threading.Lock()
 class AccountOperationStart:
     operation: ConnectionOperation
     started: bool
-    prepared: threading.Event = field(default_factory=threading.Event)
-    finished: threading.Event = field(default_factory=threading.Event)
-    failed: threading.Event = field(default_factory=threading.Event)
+    done: threading.Event = field(default_factory=threading.Event)
+    failed: bool = False
 
 
 def _matching_open_operation(names: list[str], *, profile_home: str | None) -> ConnectionOperation | None:
@@ -43,7 +40,6 @@ def find_or_start_operation(
     *,
     action: str,
     profile_home: str | None,
-    client_factory: Callable[[], Any] | None = None,
 ) -> AccountOperationStart:
     """Join the exact open managed operation, or atomically reserve and start a new one."""
     with _start_lock:
@@ -56,7 +52,7 @@ def find_or_start_operation(
         started = AccountOperationStart(operation=operation, started=True)
         context = contextvars.copy_context()
         thread = threading.Thread(
-            target=lambda: context.run(_run, started, action, client_factory),
+            target=lambda: context.run(_run, started, action),
             daemon=True,
             name="connector-account-operation",
         )
@@ -69,38 +65,23 @@ def find_or_start_operation(
     return started
 
 
-def _run(start: AccountOperationStart, action: str, client_factory: Callable[[], Any] | None) -> None:
-    def callback(_payload: dict[str, Any]) -> None:
-        start.prepared.set()
-
+def _run(start: AccountOperationStart, action: str) -> None:
     try:
-        client = (client_factory or managed.managed_client)()
-        run_operation(
-            start.operation.targets,
-            managed.managed_kind(client, action, force=False),
-            session_key=start.operation.session_key,
-            tool_call_id=None,
-            connection_callback=callback,
+        drive_operation(
+            start.operation,
+            managed.managed_kind(managed.managed_client(), action, force=False),
+            connection_callback=lambda _payload: start.done.set(),
             tick_seconds=managed.WATCH_TICK_SECONDS,
             with_urls_in_result=False,
-            operation=start.operation,
-            register_operation=False,
         )
     except Exception:
-        # ``run_operation`` closes what it ran; a failure before it (the client factory) would
-        # leave a registered operation that every later connect for this app joins forever.
+        # A failure before ``drive_operation`` leaves a registered operation every later connect joins forever.
         live.close(start.operation)
-        start.failed.set()
+        start.failed = True
     finally:
-        start.finished.set()
+        start.done.set()
 
 
 def wait_for_prepare(start: AccountOperationStart) -> bool:
     """Wait only for the initial mint, whose HTTP client has its own bounded timeout."""
-    deadline = time.monotonic() + _PREPARE_WAIT_SECONDS
-    while not start.prepared.is_set() and not start.finished.is_set():
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        start.prepared.wait(min(0.05, remaining))
-    return True
+    return start.done.wait(_PREPARE_WAIT_SECONDS)

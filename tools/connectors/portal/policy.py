@@ -2,136 +2,61 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
+from tools.connectors.gateway.errors import GatewayUnavailable
 from tools.connectors.portal.client import validate_slug
-from tools.connectors.portal.wire import (
-    AllowPolicyBody,
-    DenyAllPolicyBody,
-    DenyPolicyBody,
-    PolicyBody,
-    UnrestrictedPolicyBody,
-)
+from tools.connectors.portal.wire import PolicyBody, UnrestrictedPolicyBody
+
+if TYPE_CHECKING:
+    from tui_gateway.contracts.connectors import ConnectorChange, ToolsChange
 
 
 class InvalidMemberPolicy(ValueError):
     """The requested policy change cannot be represented by the member layer."""
 
 
-def compose_member_write(member_body: PolicyBody | None, change: Any) -> dict[str, Any]:
-    """Return the strict portal write for one connector or tool-list change."""
+# Every member mode is one connector list plus a polarity: on an allow list membership means on.
+_LAYERS: dict[str, tuple[bool, Callable[[Any], list[str]]]] = {
+    "unrestricted": (False, lambda _body: []),
+    "deny-all": (True, lambda _body: []),
+    "allow": (True, lambda body: list(body.connectors)),
+    "deny": (False, lambda body: list(body.disabled_connectors)),
+}
+
+
+def _layer(member_body: PolicyBody | None) -> tuple[str, list[str], bool]:
     body = member_body or UnrestrictedPolicyBody(mode="unrestricted")
-    connector = _validated_connector(getattr(change, "connector", None))
-    change_type = getattr(change, "type", None)
-    table = {
-        "unrestricted": _compose_unrestricted,
-        "deny-all": _compose_deny_all,
-        "allow": _compose_allow,
-        "deny": _compose_deny,
-    }
-    try:
-        return table[body.mode](body, change_type, connector, change)
-    except KeyError as exc:
-        raise InvalidMemberPolicy("unsupported policy change") from exc
+    allow, values_of = _LAYERS[body.mode]
+    return "connectors" if allow else "disabledConnectors", values_of(body), allow
 
 
-def _validated_connector(value: object) -> str:
-    if not isinstance(value, str):
-        raise InvalidMemberPolicy("connector must be a slug")
+def _slug(connector: str) -> str:
     try:
-        validate_slug(value)
-    except Exception as exc:
+        validate_slug(connector)
+    except GatewayUnavailable as exc:
         raise InvalidMemberPolicy("connector must be a slug") from exc
-    return value
+    return connector
 
 
-def _disabled_tools(change: Any) -> list[str]:
-    value = getattr(change, "disabled_tools", None)
-    if not isinstance(value, list) or len(value) > 2000:
-        raise InvalidMemberPolicy("disabled_tools must be a list of at most 2000 tool slugs")
-    if any(not isinstance(tool, str) or not tool or len(tool) > 256 for tool in value):
+def _validated_tools(tools: list[str]) -> list[str]:
+    if any(not tool or len(tool) > 256 for tool in tools):
         raise InvalidMemberPolicy("disabled_tools must contain non-empty tool slugs up to 256 characters")
-    return value
+    return tools
 
 
-def _connector_change(change_type: object, change: Any) -> bool:
-    enabled = getattr(change, "enabled", None)
-    if change_type != "connector" or not isinstance(enabled, bool):
-        raise InvalidMemberPolicy("connector change must include enabled")
-    return enabled
-
-
-def _list_write(key: str, values: list[str]) -> dict[str, Any]:
-    return {"scope": "member", key: values}
-
-
-def _tools_write(
-    key: str,
-    values: list[str],
-    connector: str,
-    change: Any,
-    *,
-    connector_is_off: bool,
-) -> dict[str, Any]:
-    if getattr(change, "type", None) != "tools":
-        raise InvalidMemberPolicy("unsupported policy change")
-    if connector_is_off:
-        raise InvalidMemberPolicy("connector is off in the member policy")
-    return {"scope": "member", key: values, "tools": {connector: _disabled_tools(change)}}
-
-
-def _compose_unrestricted(
-    _body: UnrestrictedPolicyBody,
-    change_type: object,
-    connector: str,
-    change: Any,
-) -> dict[str, Any]:
-    values: list[str] = []
-    if change_type == "connector":
-        return _list_write("disabledConnectors", values if _connector_change(change_type, change) else [connector])
-    return _tools_write("disabledConnectors", values, connector, change, connector_is_off=False)
-
-
-def _compose_deny_all(
-    _body: DenyAllPolicyBody,
-    change_type: object,
-    connector: str,
-    change: Any,
-) -> dict[str, Any]:
-    values: list[str] = []
-    if change_type == "connector":
-        return _list_write("connectors", [connector] if _connector_change(change_type, change) else values)
-    raise InvalidMemberPolicy("connector is off in the member policy")
-
-
-def _compose_allow(
-    body: AllowPolicyBody,
-    change_type: object,
-    connector: str,
-    change: Any,
-) -> dict[str, Any]:
-    values = list(body.connectors)
-    if change_type == "connector":
-        enabled = _connector_change(change_type, change)
-        updated = _with_membership(values, connector, enabled)
-        return _list_write("connectors", updated)
-    return _tools_write("connectors", values, connector, change, connector_is_off=connector not in values)
-
-
-def _compose_deny(
-    body: DenyPolicyBody,
-    change_type: object,
-    connector: str,
-    change: Any,
-) -> dict[str, Any]:
-    values = list(body.disabled_connectors)
-    if change_type == "connector":
-        enabled = _connector_change(change_type, change)
-        updated = _with_membership(values, connector, not enabled)
-        return _list_write("disabledConnectors", updated)
-    return _tools_write("disabledConnectors", values, connector, change, connector_is_off=connector in values)
-
-
-def _with_membership(values: list[str], connector: str, included: bool) -> list[str]:
+def compose_connector_write(member_body: PolicyBody | None, change: ConnectorChange) -> dict[str, Any]:
+    """Return the strict portal write that turns one connector on or off."""
+    connector = _slug(change.connector)
+    key, values, allow = _layer(member_body)
     retained = [item for item in values if item != connector]
-    return retained if not included else [*retained, connector]
+    return {"scope": "member", key: [*retained, connector] if change.enabled == allow else retained}
+
+
+def compose_tools_write(member_body: PolicyBody | None, change: ToolsChange) -> dict[str, Any]:
+    """Return the strict portal write that sets one connector's disabled tool list."""
+    connector = _slug(change.connector)
+    key, values, allow = _layer(member_body)
+    if (connector in values) != allow:
+        raise InvalidMemberPolicy("connector is off in the member policy")
+    return {"scope": "member", key: values, "tools": {connector: _validated_tools(change.disabled_tools)}}

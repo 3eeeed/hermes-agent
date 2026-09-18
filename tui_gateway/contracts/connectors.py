@@ -6,27 +6,12 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from .base import Params, Result, WireEnum
-from .common import OpenModel, ProfileParams
+from .base import Result, WireEnum
+from .common import ConnectorOwner, OpenModel, ProfileParams
+from .connectors_operation import ConnectionOperationStatus
 from .registry import method
 
-
-class SessionOwner(Params):
-    type: Literal["session"]
-    session_id: str = Field(min_length=1)
-
-
-class AccountOwner(Params):
-    type: Literal["account"]
-
-
-ConnectorOwner = Annotated[SessionOwner | AccountOwner, Field(discriminator="type")]
-
-
 ConnectorSlug = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]*$")]
-
-
-from .connectors_operation import ConnectionOperationStatus
 
 
 class ConnectorErrorReason(WireEnum):
@@ -89,9 +74,7 @@ class ConnectorsConnectParams(ProfileParams):
 
 
 class ConnectorsConnectResult(ConnectionOperationStatus):
-    """The operation the connect opened (or re-minted on): ``tools/connectors/managed.py``
-    ``_off_desktop_result`` / ``methods_connectors._reissue``. ``status``/``note`` ride along from
-    the tool result when the call ran through ``manage_connections``."""
+    """``methods_connectors._reissue`` / ``managed._off_desktop_result``: the operation the connect opened; ``status``/``note`` ride along from the tool result."""
 
     status: str | None = None
     note: str | None = None
@@ -118,6 +101,8 @@ class ConnectorToolFacet(WireEnum):
 
 
 class ConnectorToolRow(Result):
+    model_config = Result.model_config | {"from_attributes": True}
+
     slug: str
     name: str
     description: str
@@ -134,6 +119,8 @@ class ConnectorToolsSource(WireEnum):
 
 
 class ConnectorToolsResult(Result):
+    model_config = Result.model_config | {"from_attributes": True}
+
     connector: str
     toolkit_version: str
     etag: str
@@ -152,6 +139,8 @@ method(
 
 
 class ConnectorCatalogRow(Result):
+    model_config = Result.model_config | {"from_attributes": True}
+
     slug: str
     name: str
     description: str
@@ -160,6 +149,8 @@ class ConnectorCatalogRow(Result):
 
 
 class ConnectorsCatalogResult(Result):
+    model_config = Result.model_config | {"from_attributes": True}
+
     connectors: list[ConnectorCatalogRow]
 
 
@@ -181,7 +172,7 @@ class ConnectorAccountStatus(WireEnum):
 
 
 class ConnectorAccountsParams(ProfileParams):
-    connector: str | None = None
+    connector: ConnectorSlug | None = None
 
 
 class ConnectorAccountRow(Result):

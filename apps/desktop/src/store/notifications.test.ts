@@ -102,7 +102,6 @@ test('out-of-sync RPC errors summarize the version mismatch and open backend upd
 
   expect(lastMessage()).toBe(en.notifications.errors.rpcOutOfSync)
   expect($notifications.get()[0]?.action?.label).toBe(en.notifications.updateHermes)
-  $notifications.get()[0]?.action?.onClick()
 })
 
 test('code-skew 503 unwraps to a restart-required summary, not raw IPC JSON', () => {

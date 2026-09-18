@@ -4,49 +4,50 @@ from types import SimpleNamespace
 
 import pytest
 
-from tools.connectors.portal.policy import InvalidMemberPolicy, compose_member_write
+from tools.connectors.portal.policy import (
+    InvalidMemberPolicy,
+    compose_connector_write,
+    compose_tools_write,
+)
 from tools.connectors.portal.wire import ConnectorCatalogResponse, ConnectorPolicyResponse
 
 
 @pytest.mark.parametrize(
-    ("body", "change", "expected"),
+    ("body", "compose", "change", "expected"),
     [
-        (None, SimpleNamespace(type="connector", connector="linear", enabled=False),
+        (None, compose_connector_write, SimpleNamespace(connector="linear", enabled=False),
          {"scope": "member", "disabledConnectors": ["linear"]}),
-        (None, SimpleNamespace(type="tools", connector="linear", disabled_tools=["create"]),
+        (None, compose_tools_write, SimpleNamespace(connector="linear", disabled_tools=["create"]),
          {"scope": "member", "disabledConnectors": [], "tools": {"linear": ["create"]}}),
-        (SimpleNamespace(mode="deny-all"), SimpleNamespace(type="connector", connector="linear", enabled=True),
+        (SimpleNamespace(mode="deny-all"), compose_connector_write,
+         SimpleNamespace(connector="linear", enabled=True),
          {"scope": "member", "connectors": ["linear"]}),
-        (SimpleNamespace(mode="deny-all"), SimpleNamespace(type="tools", connector="linear", disabled_tools=["create"]),
+        (SimpleNamespace(mode="deny-all"), compose_tools_write,
+         SimpleNamespace(connector="linear", disabled_tools=["create"]),
          InvalidMemberPolicy),
-        (SimpleNamespace(mode="allow", connectors=["linear"], tools={}),
-         SimpleNamespace(type="connector", connector="linear", enabled=False),
+        (SimpleNamespace(mode="allow", connectors=["linear"], tools={}), compose_connector_write,
+         SimpleNamespace(connector="linear", enabled=False),
          {"scope": "member", "connectors": []}),
-        (SimpleNamespace(mode="allow", connectors=["linear"], tools={}),
-         SimpleNamespace(type="tools", connector="linear", disabled_tools=["create"]),
+        (SimpleNamespace(mode="allow", connectors=["linear"], tools={}), compose_tools_write,
+         SimpleNamespace(connector="linear", disabled_tools=["create"]),
          {"scope": "member", "connectors": ["linear"], "tools": {"linear": ["create"]}}),
-        (SimpleNamespace(mode="deny", disabled_connectors=["linear"], tools={}),
-         SimpleNamespace(type="connector", connector="linear", enabled=True),
+        (SimpleNamespace(mode="deny", disabled_connectors=["linear"], tools={}), compose_connector_write,
+         SimpleNamespace(connector="linear", enabled=True),
          {"scope": "member", "disabledConnectors": []}),
-        (SimpleNamespace(mode="deny", disabled_connectors=[], tools={}),
-         SimpleNamespace(type="tools", connector="linear", disabled_tools=["create"]),
+        (SimpleNamespace(mode="deny", disabled_connectors=["linear"], tools={}), compose_tools_write,
+         SimpleNamespace(connector="linear", disabled_tools=["create"]),
+         InvalidMemberPolicy),
+        (SimpleNamespace(mode="deny", disabled_connectors=[], tools={}), compose_tools_write,
+         SimpleNamespace(connector="linear", disabled_tools=["create"]),
          {"scope": "member", "disabledConnectors": [], "tools": {"linear": ["create"]}}),
     ],
 )
-def test_compose_member_write_handles_every_member_mode_and_change(body, change, expected):
+def test_member_policy_writes_handle_every_member_mode_and_change(body, compose, change, expected):
     if isinstance(expected, type) and issubclass(expected, Exception):
         with pytest.raises(expected):
-            compose_member_write(body, change)
+            compose(body, change)
         return
-    assert compose_member_write(body, change) == expected
-
-
-def test_compose_member_write_refuses_tools_for_a_connector_the_member_turned_off():
-    body = SimpleNamespace(mode="deny", disabled_connectors=["linear"], tools={})
-    change = SimpleNamespace(type="tools", connector="linear", disabled_tools=["create"])
-
-    with pytest.raises(InvalidMemberPolicy):
-        compose_member_write(body, change)
+    assert compose(body, change) == expected
 
 
 def test_catalog_and_policy_wires_tolerate_added_fields_and_keep_open_categories():

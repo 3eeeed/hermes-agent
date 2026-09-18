@@ -246,7 +246,7 @@ def run_managed_action(
             return _off_desktop_result(client, action, connectors, force, session_key)
         return run_operation(
             [Target(n, "connector", action) for n in connectors],
-            Kind(prepare=_prepare(client, action, force), observe=lambda op: _observe(client, op), note=NOTE),
+            managed_kind(client, action, force),
             session_key=session_key, tool_call_id=tool_call_id, tick_seconds=WATCH_TICK_SECONDS,
             connection_callback=connection_callback, with_urls_in_result=False,
         )

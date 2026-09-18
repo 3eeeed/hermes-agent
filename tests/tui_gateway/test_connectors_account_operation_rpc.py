@@ -5,79 +5,24 @@ from __future__ import annotations
 import threading
 import time
 
+from tests.fakes.connectors_managed import FakeManagedClient
+from tests.tui_gateway.conftest import ReplyTransport, reply
 from tools.connectors import live
 
 
-class _Transport:
-    def __init__(self):
-        self.frames = []
-        self.event = threading.Event()
+def test_a_client_still_sending_the_old_top_level_session_id_is_refused():
+    answer = reply(ReplyTransport(), "connectors.list", {"session_id": "s"})
 
-    def write(self, frame):
-        self.frames.append(frame)
-        self.event.set()
-        return True
-
-    def close(self):
-        pass
-
-
-def _reply(transport, method, params):
-    from tui_gateway import server
-
-    start = len(transport.frames)
-    direct = server.dispatch({"jsonrpc": "2.0", "id": 7, "method": method, "params": params}, transport)
-    if direct is not None:
-        # Status, wake and respond answer inline; list and connect reply through the transport.
-        return direct
-    deadline = time.monotonic() + 2
-    while time.monotonic() < deadline:
-        replies = [frame for frame in transport.frames[start:] if frame.get("id") == 7]
-        if replies:
-            return replies[-1]
-        transport.event.wait(0.05)
-        transport.event.clear()
-    raise AssertionError(f"{method} did not reply")
-
-
-class _Client:
-    def __init__(self):
-        self.connected = threading.Event()
-        self.mints = 0
-
-    def connections(self, names, *, reinitiate=False, **_):
-        self.mints += 1
-        return {"results": [
-            {"connector": name, "status": "initiated", "connect_url": f"https://connect.example/{name}",
-             "connection_id": f"ca_{name}"}
-            for name in names
-        ]}
-
-    def account_status(self, connection_id, *, timeout=None):
-        name = connection_id.removeprefix("ca_")
-        return {"connector": name, "connectionId": connection_id, "status": "active" if self.connected.is_set() else "pending"}
-
-
-def test_connector_owner_union_accepts_both_tags_and_rejects_the_old_session_id():
-    from pydantic import ValidationError
-    from tui_gateway.contracts.connectors import ConnectorsListParams
-
-    assert ConnectorsListParams.model_validate({"owner": {"type": "session", "session_id": "s"}}).owner.type == "session"
-    assert ConnectorsListParams.model_validate({"owner": {"type": "account"}}).owner.type == "account"
-    try:
-        ConnectorsListParams.model_validate({"session_id": "s"})
-    except ValidationError:
-        pass
-    else:
-        raise AssertionError("the legacy top-level session_id must be refused")
+    assert answer["error"]["code"] == 4000
+    assert "session_id" in answer["error"]["message"]
 
 
 def test_account_connect_starts_a_watcher_broadcasts_updates_and_closes(monkeypatch):
-    from tools.connectors import account, managed
+    from tools.connectors import managed
     from tui_gateway import server
 
-    client = _Client()
-    transport = _Transport()
+    client = FakeManagedClient()
+    transport = ReplyTransport()
     live.reset_for_tests()
     monkeypatch.setattr("tools.connectors.connectors_available", lambda: True)
     monkeypatch.setattr(managed, "WATCH_TICK_SECONDS", 0.01)
@@ -85,15 +30,15 @@ def test_account_connect_starts_a_watcher_broadcasts_updates_and_closes(monkeypa
     monkeypatch.setattr(server, "_live_transports", {transport})
     monkeypatch.setattr(server, "_live_transports_lock", threading.Lock())
     try:
-        reply = _reply(transport, "connectors.connect", {
+        answer = reply(transport, "connectors.connect", {
             "owner": {"type": "account"}, "connectors": ["gmail"], "reconnect": False,
         })
-        assert reply["result"]["op_id"]
-        assert reply["result"]["targets"] == [{
+        assert answer["result"]["op_id"]
+        assert answer["result"]["targets"] == [{
             "name": "gmail", "kind": "connector", "action": "connect", "state": "initiated",
             "connect_url": "https://connect.example/gmail", "connection_id": "ca_gmail",
         }]
-        operation = live.get_by_op_id(reply["result"]["op_id"])
+        operation = live.get_by_op_id(answer["result"]["op_id"])
         assert operation is not None and client.mints == 1
         client.connected.set()
         deadline = time.monotonic() + 2
@@ -107,31 +52,6 @@ def test_account_connect_starts_a_watcher_broadcasts_updates_and_closes(monkeypa
         # The broadcast reaches every connected client, so the authorization link never rides it.
         assert all("connect_url" not in target for update in updates for target in update["targets"])
         assert live.get_by_op_id(operation.op_id) is None
-    finally:
-        live.reset_for_tests()
-
-
-def test_account_connect_joins_the_open_operation_without_a_second_mint(monkeypatch):
-    from tools.connectors import account, managed
-
-    client = _Client()
-    settled = threading.Event()
-    live.reset_for_tests()
-    monkeypatch.setattr(managed, "managed_client", lambda: client)
-    original_close = live.close
-
-    def close(operation):
-        original_close(operation)
-        settled.set()
-
-    monkeypatch.setattr(live, "close", close)
-    try:
-        first = account.find_or_start_operation(["gmail"], action="connect", profile_home=None)
-        assert account.wait_for_prepare(first)
-        second = account.find_or_start_operation(["gmail"], action="connect", profile_home=None)
-        assert second.started is False and second.operation is first.operation and client.mints == 1
-        client.connected.set()
-        assert settled.wait(2)
     finally:
         live.reset_for_tests()
 
@@ -155,9 +75,9 @@ def test_account_wake_is_profile_local(monkeypatch, tmp_path):
     finally:
         reset_hermes_home_override(token)
     try:
-        reply = _reply(_Transport(), "connectors.operation.wake", {
+        answer = reply(ReplyTransport(), "connectors.operation.wake", {
             "owner": {"type": "account"}, "op_id": operation.op_id,
         })
-        assert reply["error"]["data"]["reason"] == "UNKNOWN_OPERATION"
+        assert answer["error"]["data"]["reason"] == "UNKNOWN_OPERATION"
     finally:
         live.reset_for_tests()

@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import pytest
 
+from tests.fakes.connectors_http import FakeResponse, FakeTransport
 from tools.connectors.gateway.errors import GatewayAuthError, GatewayUnavailable
-from tools.connectors.portal.client import NotModified, PortalConnectorClient
+from tools.connectors.portal.client import DEFAULT_TIMEOUT_SECONDS, NotModified, PortalConnectorClient
 from tools.connectors.portal.errors import PortalToolsUnavailable
 from tools.connectors.portal.tools_cache import TTL_SECONDS, read_tools
 from tools.connectors.portal.wire import ConnectorToolsListing
-
-
-_DESCRIPTION = "D" * 200
 
 
 def _listing(*, etag: str = '"v1"') -> ConnectorToolsListing:
@@ -36,30 +34,6 @@ def _listing(*, etag: str = '"v1"') -> ConnectorToolsListing:
     )
 
 
-class _Response:
-    def __init__(self, status_code, body=None, *, headers=None):
-        self.status_code = status_code
-        self._body = body
-        self.headers = headers or {}
-
-    def json(self):
-        if isinstance(self._body, Exception):
-            raise self._body
-        return self._body
-
-
-class _Transport:
-    def __init__(self, *responses):
-        self.responses = list(responses)
-        self.requests = []
-
-    def request(self, method, url, *, headers=None, timeout=None):
-        self.requests.append(
-            {"method": method, "url": url, "headers": dict(headers or {}), "timeout": timeout}
-        )
-        return self.responses.pop(0)
-
-
 class _CacheClient:
     def __init__(self, *outcomes):
         self.outcomes = list(outcomes)
@@ -76,9 +50,9 @@ class _CacheClient:
         return outcome
 
 
-def test_client_and_cache_use_the_fresh_entry_then_revalidate_a_stale_entry(monkeypatch, tmp_path):
-    transport = _Transport(
-        _Response(
+def test_portal_client_parses_a_listing_and_sends_one_bounded_authorized_request():
+    transport = FakeTransport(
+        FakeResponse(
             200,
             {
                 **_listing().model_dump(by_alias=True),
@@ -95,18 +69,20 @@ def test_client_and_cache_use_the_fresh_entry_then_revalidate_a_stale_entry(monk
         endpoint_resolver=lambda: "https://portal.example.test",
         header_provider=lambda _url: {"Authorization": "Bearer fresh-token"},
     )
+
     parsed = portal_client.tools("mail-service")
+
     assert isinstance(parsed, ConnectorToolsListing)
     assert parsed.etag == '"header-v1"' and parsed.tools[0].facet == "unclassified"
     assert parsed.tools[0].description == "D"
     assert parsed.tools[0].categories == ["messaging"]
-    assert transport.requests == [{
-        "method": "GET",
-        "url": "https://portal.example.test/api/v1/connectors/mail-service/tools",
-        "headers": {"Accept": "application/json", "Authorization": "Bearer fresh-token"},
-        "timeout": 30.0,
-    }]
+    assert transport.requests[0]["method"] == "GET"
+    assert transport.requests[0]["url"] == "https://portal.example.test/api/v1/connectors/mail-service/tools"
+    assert transport.requests[0]["headers"] == {"Accept": "application/json", "Authorization": "Bearer fresh-token"}
+    assert transport.requests[0]["timeout"] == DEFAULT_TIMEOUT_SECONDS
 
+
+def test_cache_serves_a_fresh_entry_and_revalidates_a_stale_one(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     client = _CacheClient(_listing(), NotModified())
 

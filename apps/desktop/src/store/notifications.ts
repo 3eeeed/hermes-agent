@@ -1,6 +1,7 @@
 import { atom } from 'nanostores'
 
 import { translateNow } from '@/i18n'
+import { isOutOfSyncRpcParams } from '@/lib/gateway-rpc'
 import { isLocalBackendSlotWaitTimeout, requestPoolLimitsSettings } from '@/store/pool-limits'
 import { requestBackendRestart, requestRoute } from '@/store/recovery-requests'
 
@@ -183,7 +184,7 @@ const ERROR_SUMMARIES: ErrorSummaryRule[] = [
     summarize: () => translateNow('notifications.errors.microphonePermission')
   },
   {
-    test: msg => /out of sync \(different versions\)/i.test(msg),
+    test: msg => isOutOfSyncRpcParams(msg),
     summarize: () => translateNow('notifications.errors.rpcOutOfSync'),
     action: () => RECOVERY_ACTIONS.openUpdates()
   },
@@ -271,8 +272,7 @@ export function notifyError(
           onClick: requestPoolLimitsSettings
         }
       : (options.action ?? readable.action),
-    // A caller that can fire again for the same cause (a hook that remounts) names its toast,
-    // so the repeat replaces it and never stacks.
+    // A caller that can fire again for the same cause names its toast, so the repeat replaces it.
     id: options.id,
     kind: 'error',
     title: fallback,

@@ -2,31 +2,23 @@
 
 from __future__ import annotations
 
-import time
+import pytest
+
+from tests.tui_gateway.conftest import ReplyTransport, reply
 
 
-class _ReplyTransport:
-    def __init__(self):
-        self.frames = []
-
-    def write(self, obj):
-        self.frames.append(obj)
-        return True
-
-    def close(self):
-        pass
-
-
-def _reply(transport, method, params):
+@pytest.mark.parametrize("name", [
+    "connectors.tools",
+    "connectors.catalog",
+    "connectors.accounts",
+    "connectors.accounts.remove",
+    "connectors.policy.get",
+    "connectors.policy.set",
+])
+def test_every_account_connector_rpc_runs_off_the_server_loop(name):
     from tui_gateway import server
 
-    server.dispatch({"jsonrpc": "2.0", "id": 7, "method": method, "params": params}, transport)
-    deadline = time.time() + 2
-    while time.time() < deadline:
-        if transport.frames:
-            return transport.frames[-1]
-        time.sleep(0.01)
-    raise AssertionError(f"{method} did not reply")
+    assert name in server._LONG_HANDLERS
 
 
 def test_policy_set_surfaces_conflict_and_preserves_the_seen_revision(monkeypatch):
@@ -49,7 +41,7 @@ def test_policy_set_surfaces_conflict_and_preserves_the_seen_revision(monkeypatc
     monkeypatch.setattr("tools.connectors.connectors_available", lambda: True)
     monkeypatch.setattr("tools.connectors.portal.client.PortalConnectorClient", Client)
 
-    reply = _reply(_ReplyTransport(), "connectors.policy.set", {
+    answer = reply(ReplyTransport(), "connectors.policy.set", {
         "change": {"type": "tools", "connector": "linear", "disabled_tools": ["create"]},
         "expected_revision": "shown-revision",
     })
@@ -60,7 +52,7 @@ def test_policy_set_surfaces_conflict_and_preserves_the_seen_revision(monkeypatc
         "tools": {"linear": ["create"]},
         "expectedRevision": "shown-revision",
     }
-    assert reply["error"] == {
+    assert answer["error"] == {
         "code": 4090,
         "message": "Connector policy changed. Refresh and try again.",
         "data": {"reason": "POLICY_CONFLICT"},
@@ -83,9 +75,9 @@ def test_account_remove_maps_not_found_and_returns_the_removed_account(monkeypat
     monkeypatch.setattr("tools.connectors.gateway.client.ConnectorClient", Client)
 
     Client.outcome = GatewayUnavailable("hidden", code="connection_not_found", status=404)
-    missing = _reply(_ReplyTransport(), "connectors.accounts.remove", {"connection_id": "ca_missing"})
+    missing = reply(ReplyTransport(), "connectors.accounts.remove", {"connection_id": "ca_missing"})
     Client.outcome = {"connectionId": "ca_1", "status": "removed"}
-    removed = _reply(_ReplyTransport(), "connectors.accounts.remove", {"connection_id": "ca_1"})
+    removed = reply(ReplyTransport(), "connectors.accounts.remove", {"connection_id": "ca_1"})
 
     assert missing["error"] == {
         "code": 4041,

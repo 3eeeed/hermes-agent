@@ -4056,21 +4056,6 @@
         "title": "AccountOwner",
         "type": "object"
       },
-      "AccountOwnerPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "type": {
-            "const": "account",
-            "title": "Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "type"
-        ],
-        "title": "AccountOwnerPayload",
-        "type": "object"
-      },
       "ActiveIdResult": {
         "additionalProperties": false,
         "properties": {
@@ -8963,17 +8948,17 @@
           "owner": {
             "discriminator": {
               "mapping": {
-                "account": "#/components/schemas/AccountOwnerPayload",
-                "session": "#/components/schemas/SessionOwnerPayload"
+                "account": "#/components/schemas/AccountOwner",
+                "session": "#/components/schemas/SessionOwner"
               },
               "propertyName": "type"
             },
             "oneOf": [
               {
-                "$ref": "#/components/schemas/SessionOwnerPayload"
+                "$ref": "#/components/schemas/SessionOwner"
               },
               {
-                "$ref": "#/components/schemas/AccountOwnerPayload"
+                "$ref": "#/components/schemas/AccountOwner"
               }
             ],
             "title": "Owner"
@@ -9158,6 +9143,7 @@
           "connector": {
             "anyOf": [
               {
+                "pattern": "^[a-z0-9][a-z0-9_-]*$",
                 "type": "string"
               },
               {
@@ -9887,7 +9873,7 @@
       },
       "ConnectorsConnectResult": {
         "additionalProperties": false,
-        "description": "The operation the connect opened (or re-minted on): ``tools/connectors/managed.py``\n``_off_desktop_result`` / ``methods_connectors._reissue``. ``status``/``note`` ride along from\nthe tool result when the call ran through ``manage_connections``.",
+        "description": "``methods_connectors._reissue`` / ``managed._off_desktop_result``: the operation the connect opened; ``status``/``note`` ride along from the tool result.",
         "properties": {
           "op_id": {
             "title": "Op Id",
@@ -27320,26 +27306,6 @@
           "session_id"
         ],
         "title": "SessionOwner",
-        "type": "object"
-      },
-      "SessionOwnerPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "type": {
-            "const": "session",
-            "title": "Type",
-            "type": "string"
-          },
-          "session_id": {
-            "title": "Session Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "type",
-          "session_id"
-        ],
-        "title": "SessionOwnerPayload",
         "type": "object"
       },
       "SessionParams": {

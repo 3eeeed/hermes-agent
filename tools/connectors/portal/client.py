@@ -83,9 +83,13 @@ class PortalConnectorClient:
         return self._endpoint_resolver().rstrip("/")
 
     def require_authentication(self) -> None:
-        headers = self._header_provider(self.origin())
+        self._authorized_headers(self.origin())
+
+    def _authorized_headers(self, url: str, extra: dict[str, str] | None = None) -> dict[str, str]:
+        headers = {"Accept": "application/json", **(extra or {}), **self._header_provider(url)}
         if not isinstance(headers.get("Authorization"), str) or not headers["Authorization"].strip():
             raise GatewayAuthError("portal authorization required", code="NO_TOKEN", status=401)
+        return headers
 
     def tools(self, slug: str, *, if_none_match: str | None = None) -> ConnectorToolsListing | NotModified:
         validate_slug(slug)
@@ -129,14 +133,9 @@ class PortalConnectorClient:
         headers: dict[str, str] | None = None,
     ) -> tuple[Any, int]:
         url = f"{self.origin()}{path}"
-        headers = {"Accept": "application/json", **(headers or {}), **self._header_provider(url)}
-        if not isinstance(headers.get("Authorization"), str) or not headers["Authorization"].strip():
-            raise GatewayAuthError("portal authorization required", code="NO_TOKEN", status=401)
+        headers = self._authorized_headers(url, headers)
         try:
-            request_args = {"headers": headers, "timeout": DEFAULT_TIMEOUT_SECONDS}
-            if body is not None:
-                request_args["json"] = body
-            response = self._transport.request(method, url, **request_args)
+            response = self._transport.request(method, url, headers=headers, json=body, timeout=DEFAULT_TIMEOUT_SECONDS)
         except Exception as exc:
             raise PortalConnectorUnavailable("portal connector metadata unavailable", code="TRANSPORT_ERROR", retryable=True) from exc
         status = int(getattr(response, "status_code", 0))

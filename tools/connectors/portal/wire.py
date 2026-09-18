@@ -12,8 +12,6 @@ class _PortalWire(BaseModel):
 
 
 class ConnectorTool(_PortalWire):
-    """One connector tool made available by the portal."""
-
     slug: str
     name: str
     description: str
@@ -37,8 +35,6 @@ class ConnectorTool(_PortalWire):
 
 
 class ConnectorToolsListing(_PortalWire):
-    """The complete list for one connector at a portal toolkit version."""
-
     connector: str
     toolkit_version: str = Field(alias="toolkitVersion")
     etag: str
