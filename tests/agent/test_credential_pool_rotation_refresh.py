@@ -341,9 +341,11 @@ def test_rotation_skips_a_candidate_whose_refresh_token_is_dead(
         "account 2 could not refresh — rotation must step over it"
     )
     assert _usable(nxt)
-    assert _by_id(pool, "acct2").last_status == "exhausted"
-    # A failed refresh is not proof the account is revoked; don't kill it.
-    assert _by_id(pool, "acct2").last_status != "dead"
+    # A terminally-rejected refresh grant (relogin_required) means the login
+    # itself is gone, not a transient quota bench — main's fix for #113023:
+    # silently exhausting it replayed the dead token every hour at DEBUG with
+    # no visible trace that the account needs re-authentication.
+    assert _by_id(pool, "acct2").last_status == "dead"
 
 
 def test_token_invalidated_kills_only_that_credential(
