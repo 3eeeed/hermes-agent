@@ -31,10 +31,16 @@ beforeAll(async () => {
     `
     import inspector from 'node:inspector'
     import { notifyLauncherWindowRevealed } from './linux-launcher-ready.mjs'
+    // TEST_EXIT_CODE simulates a renderer that never launched under the default
+    // pick (no reveal); the X11 retry reveals and still exits with that code.
+    const retried = process.argv.includes('--ozone-platform=x11')
     console.log(JSON.stringify({
       kind: 'app', pid: process.pid, url: inspector.url(),
-      ready: notifyLauncherWindowRevealed(), argv: process.execArgv
+      ready: process.env.TEST_EXIT_CODE && !retried ? null : notifyLauncherWindowRevealed(),
+      argv: process.execArgv, args: process.argv.slice(2),
+      marker: process.env.HERMES_WSLG_AUTO_WAYLAND
     }))
+    if (process.env.TEST_EXIT_CODE) process.exit(Number(process.env.TEST_EXIT_CODE))
     setInterval(() => {}, 1000)
   `
   )
@@ -43,25 +49,36 @@ beforeAll(async () => {
     `
     import { fstatSync } from 'node:fs'
     import inspector from 'node:inspector'
-    import { spawnWslgLaunch } from './wslg-launch-process.mjs'
+    import { spawnWslgLaunch, superviseWslgLaunch } from './wslg-launch-process.mjs'
     const fd = Number(process.env.HERMES_DESKTOP_READY_FD)
     const originalUrl = inspector.url()
     const args = originalUrl ? ['--inspect=' + new URL(originalUrl).host] : []
     args.push(new URL('./app.mjs', import.meta.url).pathname)
     if (process.env.TEST_FAIL_SPAWN) process.execPath += '.missing'
+    const report = () => {
+      let fdClosed = false
+      try { fstatSync(fd) } catch { fdClosed = true }
+      console.log(JSON.stringify({ kind: 'launcher', pid: process.pid,
+        originalUrl, url: inspector.url(), fdClosed,
+        readyEnv: process.env.HERMES_DESKTOP_READY_FD
+      }))
+    }
+    if (process.env.TEST_SUPERVISE) {
+      superviseWslgLaunch(args, [...args, '--ozone-platform=x11'], code => {
+        console.log(JSON.stringify({ kind: 'exit', code }))
+        process.exit(code)
+      })
+      report()
+    } else {
     const child = spawnWslgLaunch(args)
-    let fdClosed = false
-    try { fstatSync(fd) } catch { fdClosed = true }
-    console.log(JSON.stringify({ kind: 'launcher', pid: process.pid,
-      originalUrl, url: inspector.url(), fdClosed,
-      readyEnv: process.env.HERMES_DESKTOP_READY_FD
-    }))
+    report()
     child.once('error', error => { console.error(error); process.exit(1) })
     child.once('exit', (code, signal) => {
       console.log(JSON.stringify({ kind: 'exit', code, signal }))
       process.exit(code ?? 1)
     })
     process.stdin.on('data', () => child.kill('SIGTERM'))
+    }
   `
   )
 })
@@ -76,7 +93,8 @@ async function withLauncher(
   inspect: boolean,
   run: (launcher: ChildProcess, messages: AsyncIterator<string>, stderr: () => string) => Promise<void>,
   readyFd: string | undefined = '7',
-  failSpawn = false
+  failSpawn = false,
+  extraEnv: NodeJS.ProcessEnv = {}
 ) {
   const launcher = spawn(
     process.execPath,
@@ -87,7 +105,8 @@ async function withLauncher(
         ...process.env,
         NODE_OPTIONS: '',
         HERMES_DESKTOP_READY_FD: readyFd,
-        TEST_FAIL_SPAWN: failSpawn ? '1' : ''
+        TEST_FAIL_SPAWN: failSpawn ? '1' : '',
+        ...extraEnv
       },
       stdio: ['pipe', 'pipe', 'pipe', 'ignore', 'ignore', 'ignore', 'ignore', 'pipe']
     }
@@ -236,6 +255,45 @@ test.skipIf(process.platform !== 'linux')(
       },
       '7',
       true
+    )
+  },
+  15_000
+)
+
+test.skipIf(process.platform !== 'linux')(
+  'retries exactly once on X11 without the marker and hands the retry the ready pipe',
+  async () => {
+    await withLauncher(
+      false,
+      async (launcher, messages) => {
+        const pipe = (launcher.stdio as Array<Readable | null>)[7]!
+        let ready = ''
+        pipe.on('data', chunk => {
+          ready += chunk
+        })
+        const eof = once(pipe, 'end')
+        const exited = once(launcher, 'exit')
+        const state = await startup(messages)
+        // The marked Wayland child must not consume our ready pipe copy.
+        assert.equal(state.launcher.fdClosed, false)
+        assert.equal(state.app.marker, '1')
+        assert.equal(state.app.ready, null)
+        assert.ok(!state.app.args.includes('--ozone-platform=x11'))
+        const retry = JSON.parse((await messages.next()).value)
+        assert.equal(retry.kind, 'app')
+        assert.equal(retry.marker, undefined)
+        assert.ok(retry.args.includes('--ozone-platform=x11'))
+        assert.equal(retry.ready, true)
+        await eof
+        assert.equal(ready, 'r')
+        // A second 76 is final: no third child, the code surfaces as ours.
+        assert.deepEqual(JSON.parse((await messages.next()).value), { kind: 'exit', code: 76 })
+        assert.deepEqual(await exited, [76, null])
+        assert.equal((await messages.next()).done, true)
+      },
+      '7',
+      false,
+      { TEST_SUPERVISE: '1', TEST_EXIT_CODE: '76' }
     )
   },
   15_000
