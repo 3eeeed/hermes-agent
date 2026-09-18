@@ -28,7 +28,8 @@ from hermes_cli.web_server_memory import _normalize_memory_provider_name, _requi
 from hermes_cli.web_models import (
     CodexSessionCredentialSelect,
     BackupRequest, CredentialPoolAdd, HookCreate, HookDelete, ImportRequest, MemoryProviderSelect,
-    MemoryReset, PairingApprove, PairingRevoke, WebhookCreate, WebhookEnabledToggle,
+    MemoryReset, PairingApprove, PairingRevoke, PooledCredentialRename, WebhookCreate,
+    WebhookEnabledToggle,
 )
 from hermes_cli.web_routers._common import _CONFIG_MUTATION_LOCK, http_failure, spawn_profile_action
 from hermes_cli.web_routers.files import stream_upload_to_path
@@ -283,6 +284,34 @@ async def stop_gateway(profile: Optional[str] = None):
 # once froze the uvicorn loop for 17 minutes. Every pool load below runs off-loop.
 
 
+def _pool_entry_account_email(entry: Any) -> Optional[str]:
+    """Best-effort account email from the OAuth access token's own claims.
+
+    Distinct accounts can carry an identical, operator-chosen ``label`` (the
+    desktop menu lets any row be renamed to "1"/"2"/"batal"), so the label
+    alone cannot tell two entries apart when auditing which real account is
+    which. The token itself is the only field that cannot lie: OpenAI Codex
+    tokens carry the account's email under the nested
+    ``https://api.openai.com/profile`` claim (not the top-level ``email``
+    claim ``label_from_token`` checks), so it needs its own lookup. Fails
+    open (returns None) for anthropic tokens (no such claim) and any
+    non-JWT / malformed token — this is a display nicety, never load-bearing.
+    """
+    from hermes_cli.auth_constants import _decode_jwt_claims
+
+    token = entry.access_token or ""
+    if not token:
+        return None
+    claims = _decode_jwt_claims(token)
+    profile = claims.get("https://api.openai.com/profile")
+    if isinstance(profile, dict):
+        email = profile.get("email")
+        if isinstance(email, str) and email.strip():
+            return email.strip()
+    email = claims.get("email")
+    return email.strip() if isinstance(email, str) and email.strip() else None
+
+
 def _pool_entry_summary(entry: Any, index: int) -> Dict[str, Any]:
     """Redacted view of one PooledCredential; ``index`` is 1-based to match
     CredentialPool.remove_index()."""
@@ -291,6 +320,7 @@ def _pool_entry_summary(entry: Any, index: int) -> Dict[str, Any]:
         "index": index,
         "id": entry.id,
         "label": entry.label,
+        "email": _pool_entry_account_email(entry),
         "auth_type": entry.auth_type,
         "source": entry.source,
         "priority": entry.priority,
@@ -356,13 +386,14 @@ def _pool_usage_payload(provider: str) -> Tuple[Callable[[Any], Dict[str, Any]],
             _log.debug("%s usage lookup failed for pool entry %s", provider, entry.id, exc_info=True)
             snapshot = None
         if snapshot is None:
-            return {"id": entry.id, "available": False, "label": entry.label}
+            return {"id": entry.id, "available": False, "label": entry.label, "email": _pool_entry_account_email(entry)}
         return {
             "available": snapshot.available,
             "details": list(snapshot.details),
             "fetched_at": snapshot.fetched_at.isoformat(),
             "id": entry.id,
             "label": entry.label,
+            "email": _pool_entry_account_email(entry),
             "plan": snapshot.plan,
             "unavailable_reason": snapshot.unavailable_reason,
             "windows": [
@@ -570,6 +601,31 @@ def _remove_credential_pool_entry(provider: str, target: Any):
             except Exception:
                 _log.exception("suppress_credential_source failed")
     return {"ok": True, "provider": provider, "count": len(pool.entries()), "cleaned": cleaned, "hints": hints}
+
+
+@router.patch("/api/credentials/pool/{provider}/entries/{credential_id}")
+async def rename_pool_credential_entry(provider: str, credential_id: str, body: PooledCredentialRename):
+    """Relabel an account by its immutable pool id.
+
+    The label is what the account menus show, so this is how a user records
+    which subscription a row belongs to. Identity is untouched: same id, same
+    tokens, same priority — only presentation metadata changes, and the
+    response carries no credential material.
+    """
+    from agent.credential_pool import load_pool
+
+    provider = _validated_pool_provider(provider)
+    label = (body.label or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="A label cannot be blank")
+
+    def _run():
+        renamed = load_pool(provider).rename_entry(credential_id, label)
+        if renamed is None:
+            raise HTTPException(status_code=404, detail="Account was not found")
+        return {"ok": True, "provider": provider, "id": renamed.id, "label": renamed.label}
+
+    return await asyncio.to_thread(_run)
 
 
 @router.delete("/api/credentials/pool/{provider}/entries/{credential_id}")

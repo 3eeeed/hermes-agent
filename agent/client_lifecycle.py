@@ -867,9 +867,18 @@ class ClientLifecycleMixin:
             or base_url_host_matches(getattr(self, "_anthropic_base_url", "") or "", "azure.com")
         ):
             return False
+        pinned_id = getattr(self, "_credential_pool_entry_id", None)
         try:
-            from agent.anthropic_credentials import resolve_anthropic_token
-            new_token = resolve_anthropic_token()
+            if pinned_id:
+                # A session pinned to a pool account may only rotate THAT account's token. The ambient
+                # resolver returns whichever credential is the machine default — usually another account —
+                # and adopting it bills the selected account's requests to the default one.
+                from agent.credential_pool import load_pool
+                entry = next((e for e in load_pool("anthropic").entries() if e.id == pinned_id), None)
+                new_token = getattr(entry, "runtime_api_key", None) if entry is not None else None
+            else:
+                from agent.anthropic_credentials import resolve_anthropic_token
+                new_token = resolve_anthropic_token()
         except Exception as exc:
             logger.debug("Anthropic credential refresh failed: %s", exc)
             return False

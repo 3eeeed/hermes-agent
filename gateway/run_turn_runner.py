@@ -1235,12 +1235,18 @@ class TurnRunner:
             selected_credential_id = (
                 store.get_session_model_config_value(ctx.session_id, pin_key) if store else None
             )
+            # Remembered so a later 429 in this turn can refuse to silently rotate
+            # this session onto a DIFFERENT account than the one the user picked
+            # (desktop account menu) — see recover_with_credential_pool's pin guard.
+            agent._session_pinned_credential_id = selected_credential_id or None
             if selected_credential_id and pool is not None:
                 selected_entry = next(
                     (entry for entry in pool.entries() if entry.id == selected_credential_id), None
                 )
                 if selected_entry is not None:
                     agent._swap_credential(selected_entry)
+        else:
+            agent._session_pinned_credential_id = None
 
         def persist_rotated_credential(entry) -> None:
             if not (ctx.session_id and pin_key):

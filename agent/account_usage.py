@@ -538,6 +538,36 @@ def redeem_codex_reset_credit(
     return _codex_reset_outcome(body, available)
 
 
+def _anthropic_scoped_windows(payload: dict, taken: set[str]) -> list[AccountUsageWindow]:
+    """Per-model weekly caps from Anthropic's ``limits`` array.
+
+    The top-level ``five_hour``/``seven_day`` keys only carry the session and
+    all-models windows. A model-scoped cap (Claude's own usage page renders it
+    as its own bar, e.g. "Fable — 100% used") exists ONLY as a ``limits`` entry
+    whose ``scope.model.display_name`` names the model, so ignoring the array
+    silently drops a limit that can be the one actually throttling the account.
+    Entries without a model scope are skipped: they duplicate windows already
+    built from the top-level keys.
+    """
+    windows: list[AccountUsageWindow] = []
+    for limit in payload.get("limits") or []:
+        if not isinstance(limit, dict):
+            continue
+        name = str((((limit.get("scope") or {}).get("model") or {}).get("display_name")) or "").strip()
+        percent = limit.get("percent")
+        if not name or not _is_finite_num(percent):
+            continue
+        group = str(limit.get("group") or "").strip().lower()
+        label = f"{name} {group}" if group else name
+        if label in taken:
+            continue
+        taken.add(label)
+        windows.append(AccountUsageWindow(
+            label=label, used_percent=float(percent), reset_at=_parse_dt(limit.get("resets_at")),
+        ))
+    return windows
+
+
 def _fetch_anthropic_account_usage(
     base_url: Optional[str] = None, api_key: Optional[str] = None
 ) -> Optional[AccountUsageSnapshot]:
@@ -556,13 +586,19 @@ def _fetch_anthropic_account_usage(
     payload = _get_json("https://api.anthropic.com/api/oauth/usage", headers, timeout=15.0)
     windows = _usage_windows(
         payload, (("five_hour", "Current session"), ("seven_day", "Current week"), ("seven_day_opus", "Opus week"),
-                  ("seven_day_sonnet", "Sonnet week")), "utilization", "resets_at", fraction=True,
+                  ("seven_day_sonnet", "Sonnet week")), "utilization", "resets_at",
     )
+    windows += _anthropic_scoped_windows(payload, {window.label for window in windows})
     details: list[str] = []
     extra = payload.get("extra_usage") or {}
     used_credits, monthly_limit = extra.get("used_credits"), extra.get("monthly_limit")
     if extra.get("is_enabled") and _is_num(used_credits) and _is_num(monthly_limit):
-        details.append(f"Extra usage: {used_credits:.2f} / {monthly_limit:.2f} {extra.get('currency') or 'USD'}")
+        decimal_places = extra.get("decimal_places")
+        scale = 10 ** int(decimal_places) if _is_num(decimal_places) and 0 <= int(decimal_places) <= 6 else 1
+        details.append(
+            f"Extra usage: {float(used_credits) / scale:.2f} / {float(monthly_limit) / scale:.2f} "
+            f"{extra.get('currency') or 'USD'}"
+        )
     return _snapshot("anthropic", "oauth_usage_api", windows, details)
 
 

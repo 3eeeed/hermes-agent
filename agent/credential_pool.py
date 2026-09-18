@@ -122,6 +122,10 @@ POOL_PIN_KEYS: Dict[str, str] = {
     "anthropic": "anthropic_credential_id",
 }
 
+# model_config key recording "<provider>:<credential_id>" of the account that served the session's
+# last turn. The turn runner compacts history when the pinned account differs from it.
+SERVED_POOL_CREDENTIAL_KEY = "served_pool_credential"
+
 STRATEGY_FILL_FIRST = "fill_first"
 STRATEGY_ROUND_ROBIN = "round_robin"
 STRATEGY_RANDOM = "random"
@@ -1197,22 +1201,33 @@ class CredentialPool(CredentialPoolAdminMixin):
     _sync_anthropic_entry_from_pool_store = _sync_entry_from_pool_store
 
     def _sync_entry_from_auth_store(self, entry: PooledCredential) -> PooledCredential:
-        """Sync a Codex / xAI device_code entry from auth.json ``providers.<id>.tokens``.
+        """Sync a Codex / xAI ``device_code`` entry from auth.json ``providers.<id>.tokens``.
 
         A fresh ``hermes model`` / ``hermes auth`` login writes new tokens
         under ``_auth_store_lock`` while the pool entry may sit frozen behind
         a ``last_error_reset_at`` hours in the future; without this sync every
         request fails with "no available entries" despite fresh credentials on
-        disk. Only singleton-seeded entries apply — env/API-key rows have no
-        auth.json shadow.
+        disk. Only singleton-seeded entries (source ``device_code``) apply —
+        env/API-key rows have no auth.json shadow.
+
+        ``manual:device_code`` entries (``hermes auth add openai-codex`` / the
+        desktop "add account" flow) are INDEPENDENT accounts with their own
+        token pair and must never be compared against the shared singleton
+        slot here: two such entries refreshing at different times each see
+        the other's freshly-written tokens as "newer" and adopt them,
+        silently merging two distinct Codex accounts into one (see the
+        oauth-credential-pool-operations skill postmortem). The singleton
+        write-back-driven merge check in ``hermes_cli.auth_codex._sync_codex_pool_entries``
+        already guards against this for the OTHER sync direction (auth.json →
+        pool) by comparing against the previous singleton token; this path
+        has no equivalent signal, so it must simply not touch manual entries.
         """
         spec = _TOKENS_SINGLETON_PROVIDERS.get(self.provider)
         if spec is None:
             return entry
         display = spec[0]
         is_codex = self.provider == "openai-codex"
-        sources = ("device_code", "manual:device_code") if is_codex else ("device_code",)
-        if entry.source not in sources:
+        if entry.source != "device_code":
             return entry
         try:
             with _auth_store_lock():
@@ -2061,7 +2076,26 @@ class CredentialPool(CredentialPoolAdminMixin):
             else:
                 logger.info("credential pool: marking %s exhausted (status=%s), rotating", _label, status_code)
             self._current_id = None
-            next_entry, _pending = self._select_unlocked(refresh=False)
+            next_entry, pending_refresh = self._select_unlocked(refresh=True)
+            if next_entry is None and pending_refresh:
+                # Single-use-token providers (openai-codex, xai-oauth) defer
+                # refresh out of the lock. Refresh candidates ONE AT A TIME in
+                # priority order and stop at the first usable one — refreshing
+                # every deferred entry up front would burn healthy accounts'
+                # single-use refresh tokens on a rotation that only needed one.
+                for candidate in pending_refresh:
+                    if self._refresh_entry(candidate, force=False) is not None:
+                        next_entry, _ = self._select_unlocked(refresh=False)
+                        if next_entry is not None:
+                            break
+                        continue
+                    # The refresh failed (dead grant, network, or a terminal
+                    # error that left this exact source untouched). Bench it
+                    # so the same lap does not immediately re-offer it, and
+                    # so the caller can see WHY it was skipped.
+                    stale = self._find(lambda e: e.id == candidate.id)
+                    if stale is not None and stale.last_status != STATUS_DEAD:
+                        self._mark_exhausted(stale, None, failure_reason="refresh_failed")
             if next_entry:
                 logger.info("credential pool: rotated to %s", next_entry.label or next_entry.id[:8])
             return next_entry
