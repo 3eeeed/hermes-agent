@@ -9,9 +9,11 @@ class FakeManagedClient:
     def __init__(self):
         self.connected = threading.Event()
         self.mints = 0
+        self.mint_args = {}
 
-    def connections(self, names, *, reinitiate=False, **_):
+    def connections(self, names, *, reinitiate=False, **return_to):
         self.mints += 1
+        self.mint_args = return_to
         return {"results": [
             {"connector": name, "status": "initiated", "connect_url": f"https://connect.example/{name}",
              "connection_id": f"ca_{name}"}

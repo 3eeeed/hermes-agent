@@ -29,11 +29,16 @@ def test_account_connect_starts_a_watcher_broadcasts_updates_and_closes(monkeypa
     monkeypatch.setattr(managed, "managed_client", lambda: client)
     monkeypatch.setattr(server, "_live_transports", {transport})
     monkeypatch.setattr(server, "_live_transports_lock", threading.Lock())
+    monkeypatch.setenv("HERMES_DESKTOP", "1")
+    monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
+    monkeypatch.delenv("HERMES_DESKTOP_DEV_SERVER", raising=False)
     try:
         answer = reply(transport, "connectors.connect", {
             "owner": {"type": "account"}, "connectors": ["gmail"], "reconnect": False,
         })
         assert answer["result"]["op_id"]
+        # No chat session binds the surface, yet the link must still come back to the desktop app.
+        assert client.mint_args == {"return_to": "hermes-desktop", "op": answer["result"]["op_id"]}
         assert answer["result"]["targets"] == [{
             "name": "gmail", "kind": "connector", "action": "connect", "state": "initiated",
             "connect_url": "https://connect.example/gmail", "connection_id": "ca_gmail",

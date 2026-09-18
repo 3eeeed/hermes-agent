@@ -1,5 +1,6 @@
 """Connector RPCs and the connection-operation bridge: a session owner is authorized by its transport, an account owner by its profile."""
 
+import contextlib
 import contextvars
 
 from .method_ctx import HandlerRegistry, bind_module
@@ -272,8 +273,15 @@ def _account_home(request):
     return str(home) if home else None
 
 
+@contextlib.contextmanager
 def _account_scope(request):
-    return _session_profile_runtime_scope({"profile_home": _account_home(request)})
+    with _session_profile_runtime_scope({"profile_home": _account_home(request)}):
+        # No chat session names the surface here, and the sign-in link only returns to this app when it is bound.
+        tokens = _set_session_context("")
+        try:
+            yield
+        finally:
+            _clear_session_context(tokens)
 
 
 def _operation_for_request(rid, request, session):
