@@ -1,3 +1,5 @@
+import type { MediaContextFileDescriptor } from '@/lib/media'
+
 /**
  * What a right-click landed on, resolved from the DOM.
  *
@@ -21,6 +23,10 @@ export interface ContextMenuDomTarget {
   onImage: boolean
   /** The live selection's text at the moment of the click. */
   selectionText: string
+  /** A Hermes-attached media/attachment descriptor, when the click landed on
+   *  or inside an element carrying `data-hermes-context-file` (chat images,
+   *  audio/video players, file attachments — see `@/lib/media`). */
+  contextFile: MediaContextFileDescriptor | null
 }
 
 /** Form fields and `contenteditable` hosts. Mirrors the keybind helper, but
@@ -39,6 +45,25 @@ function editableFrom(element: Element | null): HTMLElement | null {
   return host instanceof HTMLElement && host.isContentEditable ? host : null
 }
 
+function contextFileFrom(element: Element | null): MediaContextFileDescriptor | null {
+  const carrier = element?.closest('[data-hermes-context-file]')
+  const raw = carrier?.getAttribute('data-hermes-context-file')
+
+  if (!raw) {
+    return null
+  }
+
+  try {
+    const value = JSON.parse(raw) as Partial<MediaContextFileDescriptor>
+
+    return typeof value?.source === 'string' && typeof value?.name === 'string' && value.source && value.name
+      ? { kind: value.kind ?? 'local', name: value.name, source: value.source, ...(value.profile ? { profile: value.profile } : {}) }
+      : null
+  } catch {
+    return null
+  }
+}
+
 export function resolveDomTarget(element: Element | null): ContextMenuDomTarget {
   const anchor = element?.closest('a[href]')
   const dialogContent = element?.closest('[data-slot="dialog-content"]')
@@ -52,7 +77,8 @@ export function resolveDomTarget(element: Element | null): ContextMenuDomTarget 
     linkUrl: linkUrl === '#' ? '' : linkUrl,
     imageUrl: image instanceof HTMLImageElement ? image.currentSrc || image.src : '',
     onImage: Boolean(image),
-    selectionText: window.getSelection()?.toString().trim() ?? ''
+    selectionText: window.getSelection()?.toString().trim() ?? '',
+    contextFile: contextFileFrom(element)
   }
 }
 

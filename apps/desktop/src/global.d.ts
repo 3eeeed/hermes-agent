@@ -337,6 +337,14 @@ declare global {
       /** Add a word to the spell-check dictionary of a webview guest's
        *  session (the tag exposes no session API). */
       contextMenuGuestAddWord?: (payload: { webContentsId: number; word: string }) => Promise<void>
+      /** Run a file action (copy/open/reveal/copy-path) against a context-menu
+       *  file descriptor (chat images, audio/video attachments, downloads —
+       *  see `data-hermes-context-file` / `@/lib/media`). Materializes remote
+       *  (external URL / gateway) sources to a local temp path first. */
+      contextMenuFile?: (
+        action: 'copy-file' | 'copy-path' | 'open-file' | 'reveal-file',
+        descriptor: { kind: 'external' | 'gateway' | 'local'; name: string; profile?: string; source: string }
+      ) => Promise<void>
       /** Spell-check facts for the gesture that opened the current menu;
        *  fires shortly after the DOM contextmenu event. */
       onContextMenuSpellcheck?: (

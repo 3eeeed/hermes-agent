@@ -325,6 +325,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   contextMenuCopyImage: () => ipcRenderer.invoke('hermes:context-menu:copy-image'),
   contextMenuSpellcheck: action => ipcRenderer.invoke('hermes:context-menu:spellcheck', action),
   contextMenuGuestAddWord: payload => ipcRenderer.invoke('hermes:context-menu:guest-add-word', payload),
+  contextMenuFile: (action, descriptor) => ipcRenderer.invoke('hermes:context-menu:file', action, descriptor),
   onContextMenuSpellcheck: callback => {
     const listener = (_event, payload) => callback(payload)
     ipcRenderer.on('hermes:context-menu-spellcheck', listener)

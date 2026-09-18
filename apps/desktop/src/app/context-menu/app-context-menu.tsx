@@ -20,6 +20,7 @@ import { type Translations, useI18n } from '@/i18n'
 import { hostPathLabel, hudForcesNativeLinks, normalizeExternalUrl, openExternalLink } from '@/lib/external-link'
 import { formatCombo } from '@/lib/keybinds/combo'
 import { isRemoteGateway } from '@/lib/media'
+import { isMacPlatform, isWindowsPlatform } from '@/lib/platform'
 import { reachablePreviewUrl } from '@/lib/preview-reach'
 import { openCommandPalette } from '@/store/command-palette'
 import { openPreview } from '@/store/preview'
@@ -231,6 +232,37 @@ function domSections(open: Extract<OpenContextMenu, { kind: 'dom' }>, t: Transla
         ) : null
       ].filter(Boolean)
     )
+  }
+
+  if (target.contextFile) {
+    const file = target.contextFile
+
+    sections.push([
+      <Item
+        icon="go-to-file"
+        key="file-open"
+        label={copy.file.openFile}
+        onSelect={() => void window.hermesDesktop?.contextMenuFile?.('open-file', file)}
+      />,
+      <Item
+        icon="copy"
+        key="file-copy"
+        label={copy.file.copyFile}
+        onSelect={() => void window.hermesDesktop?.contextMenuFile?.('copy-file', file)}
+      />,
+      <Item
+        icon="copy"
+        key="file-copy-path"
+        label={copy.file.copyPath}
+        onSelect={() => void window.hermesDesktop?.contextMenuFile?.('copy-path', file)}
+      />,
+      <Item
+        icon="folder-opened"
+        key="file-reveal"
+        label={copy.file.revealFile(isMacPlatform() ? 'darwin' : isWindowsPlatform() ? 'win32' : 'linux')}
+        onSelect={() => void window.hermesDesktop?.contextMenuFile?.('reveal-file', file)}
+      />
+    ])
   }
 
   if (target.onImage) {

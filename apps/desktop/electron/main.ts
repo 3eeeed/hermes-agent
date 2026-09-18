@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from 'node:child_process'
+import { execFile, execFileSync, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -6,7 +6,7 @@ import https from 'node:https'
 import os from 'node:os'
 import path from 'node:path'
 import tls from 'node:tls'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import {
   app,
@@ -162,6 +162,8 @@ import {
   upsertConnection
 } from './connection-registry'
 import type { RosterProfileMetadata } from './connection-registry'
+import { runContextFileAction } from './context-file-actions'
+import { materializeLocalContextFile, materializeRemoteContextFile } from './context-file-cache'
 import { describeCrashReason, installCrashForensics } from './crash-forensics'
 import { adoptServedDashboardToken } from './dashboard-token'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
@@ -185,7 +187,7 @@ import {
 } from './desktop-uninstall'
 import { describeDevCdpDecision, resolveDevCdpPort } from './dev-cdp'
 import { installEmbedReferer } from './embed-referer'
-import { createAmbientClaimArbiter } from './event-dedupe'
+import { createAmbientClaimArbiter, createEventDeduper } from './event-dedupe'
 import {
   buildTerminalScript,
   resolveTerminalLaunch,
@@ -280,7 +282,14 @@ import { registerMcpOauthCallbackIpc } from './mcp-oauth-callback-ipc'
 import { createMediaProtocolHandler, MEDIA_PROTOCOL } from './media-protocol'
 import { fetchLocalMedia } from './media-range'
 import { createNativeAccessTokenCoordinator, NativeAuthChangedError } from './native-access-token'
-import { oauthSessionIsLive, resolveJsonBody, resolveReadinessProbeAuth } from './native-auth-decisions'
+import {
+  oauthGuardMayHardFail,
+  oauthSessionIsLive,
+  resolveJsonBody,
+  resolveOauthRestAuth,
+  resolveReadinessProbeAuth
+} from './native-auth-decisions'
+import { copyFileToClipboard } from './native-file-clipboard'
 import {
   nativeRefreshUrl,
   type NativeTokenSet,
@@ -356,6 +365,7 @@ import {
   spliceRegistrySessionRows,
   tagRegistrySessionResponse
 } from './profile-session-routing'
+import { nodePublicFetch } from './public-file-download'
 import { createQuickEntryShortcut, quickEntryWindowBounds, sanitizeQuickEntrySettings } from './quick-entry'
 import { type ActiveWork, mergeActiveWork, normalizeActiveWork, quitPromptFor } from './quit-guard'
 import { backendQuitNeedsWait, createQuitTeardownCoordinator } from './quit-teardown'
@@ -7466,6 +7476,130 @@ function installContextMenuBridge(window: BrowserWindow) {
       })
     }
   })
+}
+
+// Support for the `hermes:context-menu:file` IPC handler below: materializes a
+// context-menu file descriptor's source (local path / external URL / gateway
+// path) to a local temp file so copy/open/reveal can act on real bytes.
+const CONTEXT_FILE_CACHE_MAX_BYTES = 536_870_912
+const CONTEXT_FILE_DOWNLOAD_TIMEOUT_MS = 120_000
+const CONTEXT_FILE_CLIPBOARD_COMMAND_TIMEOUT_MS = 15_000
+
+function runContextFileClipboardCommand(command, args) {
+  return new Promise<void>((resolve, reject) => {
+    execFile(
+      command,
+      args,
+      { timeout: CONTEXT_FILE_CLIPBOARD_COMMAND_TIMEOUT_MS, windowsHide: true },
+      error => (error ? reject(error) : resolve())
+    )
+  })
+}
+
+async function fetchGatewayContextFile(connection, url, signal) {
+  if (connection.authMode === 'oauth') {
+    const accessToken = await ensureNativeAccessToken(connection.baseUrl).catch(() => null)
+
+    if (accessToken) {
+      return electronNet.fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        redirect: 'error',
+        signal
+      })
+    }
+
+    return getOauthSession().fetch(url, { redirect: 'error', signal })
+  }
+
+  return electronNet.fetch(url.toString(), {
+    headers: { 'X-Hermes-Session-Token': connection.token },
+    redirect: 'error',
+    signal
+  })
+}
+
+function gatewayContextFilePath(source) {
+  const candidate = /^file:/i.test(source) ? fileURLToPath(source) : source
+
+  if (!candidate || candidate.includes('\0') || (/^[a-z][a-z\d+.-]*:/i.test(candidate) && !/^[a-z]:[\\/]/i.test(candidate))) {
+    throw new Error('Gateway context file source must be a filesystem path')
+  }
+
+  return candidate
+}
+
+async function materializeContextMenuFile(model) {
+  if (model.kind === 'remote-file') {
+    if (!model.remoteKind) {
+      throw new Error('Remote context file is missing a trusted source kind')
+    }
+
+    if (model.remoteKind === 'external') {
+      return materializeRemoteContextFile({
+        cacheKey: `external:${model.source}`,
+        cacheRoot: path.join(app.getPath('userData'), 'context-file-cache'),
+        fetchImpl: (input, init) => nodePublicFetch(String(input), { signal: init?.signal }),
+        maxBytes: CONTEXT_FILE_CACHE_MAX_BYTES,
+        suggestedFilename: model.name,
+        timeoutMs: CONTEXT_FILE_DOWNLOAD_TIMEOUT_MS,
+        url: model.source
+      })
+    }
+
+    const activeProfile = readActiveDesktopProfile() || 'default'
+    const requestedProfile = model.profile || activeProfile
+
+    if (requestedProfile !== activeProfile) {
+      throw new Error('Gateway context file profile does not match the active desktop profile')
+    }
+
+    const connection = await ensureBackend(activeProfile)
+    const gatewayUrl = new URL('/api/files/download', connection.baseUrl)
+
+    if (!['http:', 'https:'].includes(gatewayUrl.protocol) || gatewayUrl.username || gatewayUrl.password) {
+      throw new Error('Gateway context file connection is invalid')
+    }
+
+    const gatewayPath = gatewayContextFilePath(model.source)
+    gatewayUrl.searchParams.set('path', gatewayPath)
+
+    return materializeRemoteContextFile({
+      cacheKey: `gateway:${gatewayUrl.origin}:${activeProfile}:${gatewayPath}`,
+      cacheRoot: path.join(app.getPath('userData'), 'context-file-cache'),
+      fetchImpl: (_input, init) => fetchGatewayContextFile(connection, gatewayUrl, init?.signal),
+      maxBytes: CONTEXT_FILE_CACHE_MAX_BYTES,
+      suggestedFilename: model.name,
+      timeoutMs: CONTEXT_FILE_DOWNLOAD_TIMEOUT_MS,
+      url: gatewayUrl.toString()
+    })
+  }
+
+  return materializeLocalContextFile(model.source)
+}
+
+function contextFileActionDependencies() {
+  return {
+    copyFile: filePath =>
+      copyFileToClipboard(
+        filePath,
+        process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux',
+        {
+          runCommand: runContextFileClipboardCommand,
+          writeBuffer: (format, data) => clipboard.writeBuffer(format, data)
+        },
+        { desktop: process.env.XDG_CURRENT_DESKTOP }
+      ),
+    copyText: value => clipboard.writeText(value),
+    materialize: materializeContextMenuFile,
+    openFile: async filePath => {
+      const failure = await shell.openPath(filePath)
+
+      if (failure) {
+        throw new Error(failure)
+      }
+    },
+    revealFile: filePath => shell.showItemInFolder(filePath)
+  }
 }
 
 // Microphone and camera capture. The voice composer drives mic access and
@@ -17050,6 +17184,26 @@ ipcMain.handle('hermes:context-menu:guest-add-word', (_event, payload) => {
   if (word && guest && !guest.isDestroyed()) {
     guest.session.addWordToSpellCheckerDictionary(word)
   }
+})
+
+// File action (copy/open/reveal/copy-path) against a `data-hermes-context-file`
+// descriptor the renderer attaches to chat images/attachments. Reuses the
+// same materialize/action plumbing the right-click file menu uses.
+ipcMain.handle('hermes:context-menu:file', async (_event, action, descriptor) => {
+  const source = typeof descriptor?.source === 'string' ? descriptor.source.trim() : ''
+  const name = typeof descriptor?.name === 'string' ? descriptor.name.trim() : ''
+  const kind = descriptor?.kind
+
+  if (!source || !name || !['external', 'gateway', 'local'].includes(kind)) {
+    throw new Error('Context menu file action received an invalid descriptor')
+  }
+
+  const model =
+    kind === 'local'
+      ? { kind: 'local-file' as const, source, name, items: [] }
+      : { kind: 'remote-file' as const, remoteKind: kind, source, name, items: [], ...(descriptor.profile ? { profile: descriptor.profile } : {}) }
+
+  await runContextFileAction(action, model, contextFileActionDependencies())
 })
 
 ipcMain.handle('hermes:capturePreview', async (_event, payload) => {

@@ -19,6 +19,7 @@ import {
   hermesApi,
   type ProfileScope,
   profileScoped,
+  scopedDialPriority,
   STARTUP_REQUEST_TIMEOUT_MS
 } from './client'
 

@@ -3998,6 +3998,13 @@ export const en: Translations = {
       copyImageAddress: 'Copy image address',
       saveImageAs: 'Save image as…'
     },
+    file: {
+      openFile: 'Open File',
+      copyFile: 'Copy File',
+      copyPath: 'Copy Path',
+      revealFile: platform =>
+        platform === 'darwin' ? 'Show in Finder' : platform === 'win32' ? 'Show in Explorer' : 'Show in File Manager'
+    },
     edit: {
       cut: 'Cut',
       paste: 'Paste',

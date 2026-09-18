@@ -8,6 +8,7 @@ import {
   gatewayMediaDataUrl,
   isInlineMediaSrc,
   isRemoteGateway,
+  mediaContextFileDescriptor,
   mediaExternalUrl,
   mediaGatewayStreamUrl,
   resolveMediaDisplaySrc,
@@ -74,6 +75,32 @@ describe('mediaExternalUrl', () => {
   it('falls back to file:// when remote connection lacks a token', () => {
     $connection.set({ mode: 'remote', baseUrl: 'https://gw' } as never)
     expect(mediaExternalUrl('/tmp/a.png')).toBe('file:///tmp/a.png')
+  })
+
+  it('does not describe inline data or blob URLs as copyable files', () => {
+    expect(mediaContextFileDescriptor('data:image/png;base64,ZHVtbXk=')).toBeNull()
+    expect(mediaContextFileDescriptor('blob:https://example.com/image-id')).toBeNull()
+  })
+
+  it('keeps gateway credentials and download URLs out of the DOM descriptor', () => {
+    $connection.set({
+      mode: 'remote',
+      baseUrl: 'https://gw',
+      token: 's e/cret',
+      profile: 'remote-work'
+    } as never)
+
+    const descriptor = mediaContextFileDescriptor('/tmp/factory review.pdf')
+    const serialized = JSON.stringify(descriptor)
+
+    expect(descriptor).toEqual({
+      kind: 'gateway',
+      name: 'factory review.pdf',
+      profile: 'remote-work',
+      source: '/tmp/factory review.pdf'
+    })
+    expect(serialized).not.toContain('s e/cret')
+    expect(serialized).not.toContain('downloadUrl')
   })
 })
 

@@ -3511,6 +3511,12 @@ export interface Translations {
       copyImageAddress: string
       saveImageAs: string
     }
+    file: {
+      openFile: string
+      copyFile: string
+      copyPath: string
+      revealFile: (platform: 'darwin' | 'linux' | 'win32') => string
+    }
     edit: {
       cut: string
       paste: string
