@@ -5,8 +5,8 @@ import * as inspector from 'node:inspector'
 import { LAUNCHER_READY_FD_ENV } from './linux-launcher-ready'
 
 /** Spawn the app while leaving this process alive only as its supervisor. */
-export function spawnWslgLaunch(args: string[]) {
-  const env = { ...process.env }
+export function spawnWslgLaunch(args: string[], extraEnv: NodeJS.ProcessEnv = {}) {
+  const env = { ...process.env, ...extraEnv }
   const raw = env[LAUNCHER_READY_FD_ENV]
   delete env[LAUNCHER_READY_FD_ENV]
   delete process.env[LAUNCHER_READY_FD_ENV]

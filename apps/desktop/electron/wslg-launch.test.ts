@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { shouldFallbackWslgRenderer, wslgLaunchArgs, wslgX11FallbackArgs } from './wslg-launch'
+import {
+  shouldRequestWslgX11Fallback,
+  WSLG_AUTO_WAYLAND_ENV,
+  wslgLaunchArgs,
+  wslgX11FallbackArgs
+} from './wslg-launch'
 
 const env = { WSL_DISTRO_NAME: 'Ubuntu', WAYLAND_DISPLAY: 'wayland-0', DISPLAY: ':0' }
 
@@ -9,7 +14,7 @@ describe('WSLg launch arguments', () => {
     const args = ['.', '--inspect=9229', 'hermes://session/example']
     const next = wslgLaunchArgs(args, env, 'linux')!
 
-    expect(next).toEqual([...args, '--ozone-platform=wayland', '--hermes-wslg-auto-wayland'])
+    expect(next).toEqual([...args, '--ozone-platform=wayland'])
     expect(wslgLaunchArgs(next, env, 'linux')).toBeNull()
     expect(args).toEqual(['.', '--inspect=9229', 'hermes://session/example'])
   })
@@ -24,28 +29,11 @@ describe('WSLg launch arguments', () => {
       '--ozone-platform=x11'
     ])
     expect(wslgLaunchArgs([], { ...env, HERMES_DESKTOP_DISABLE_GPU: 'true' }, 'linux')).toEqual([
-      '--ozone-platform=wayland',
-      '--hermes-wslg-auto-wayland'
+      '--ozone-platform=wayland'
     ])
     expect(wslgLaunchArgs([], { ...env, ELECTRON_OZONE_PLATFORM_HINT: 'x11' }, 'linux')).toEqual([
       '--ozone-platform=x11'
     ])
-  })
-
-  it('restarts a failed automatic Wayland renderer once on X11 without overriding explicit hints', () => {
-    const automatic = wslgLaunchArgs(['.', '--inspect=9229'], env, 'linux')!
-
-    expect(shouldFallbackWslgRenderer({ reason: 'launch-failed', exitCode: 1002 })).toBe(true)
-    expect(shouldFallbackWslgRenderer({ reason: 'crashed', exitCode: 1002 })).toBe(false)
-    expect(wslgX11FallbackArgs(automatic)).toEqual([
-      '.',
-      '--inspect=9229',
-      '--ozone-platform=x11',
-      '--hermes-wslg-x11-fallback'
-    ])
-    expect(wslgX11FallbackArgs(wslgX11FallbackArgs(automatic)!)).toBeNull()
-    expect(wslgX11FallbackArgs(wslgLaunchArgs(['--ozone-platform-hint=wayland'], env, 'linux')!)).toBeNull()
-    expect(wslgX11FallbackArgs(wslgLaunchArgs([], { ...env, ELECTRON_OZONE_PLATFORM_HINT: 'wayland' }, 'linux')!)).toBeNull()
   })
 
   it('leaves other platforms, missing Wayland displays and forwarded sessions alone', () => {
@@ -55,5 +43,34 @@ describe('WSLg launch arguments', () => {
     expect(wslgLaunchArgs([], { WSL_DISTRO_NAME: 'Ubuntu' }, 'linux')).toBeNull()
     expect(wslgLaunchArgs([], { ...env, SSH_CONNECTION: 'remote' }, 'linux')).toBeNull()
     expect(wslgLaunchArgs([], { ...env, DISPLAY: 'localhost:10.0' }, 'linux')).toBeNull()
+  })
+})
+
+describe('WSLg X11 fallback', () => {
+  it('retries a default Wayland pick once on X11 and never overrides an explicit hint', () => {
+    const args = ['.', '--inspect=9229', 'hermes://session/example']
+    const wayland = wslgLaunchArgs(args, env, 'linux')!
+    const retry = wslgX11FallbackArgs(wayland, env)!
+
+    expect(retry).toEqual([...args, '--ozone-platform=x11'])
+    // The retry carries an explicit platform: it goes straight into main and
+    // has no further fallback of its own.
+    expect(wslgLaunchArgs(retry, env, 'linux')).toBeNull()
+    expect(wslgX11FallbackArgs(retry, env)).toBeNull()
+
+    expect(wslgX11FallbackArgs(wslgLaunchArgs(['--ozone-platform-hint=wayland'], env, 'linux')!, env)).toBeNull()
+    const hinted = { ...env, ELECTRON_OZONE_PLATFORM_HINT: 'wayland' }
+
+    expect(wslgX11FallbackArgs(wslgLaunchArgs([], hinted, 'linux')!, hinted)).toBeNull()
+  })
+
+  it('lets only a marked child hand back a renderer that never launched', () => {
+    const marked = { [WSLG_AUTO_WAYLAND_ENV]: '1' }
+
+    expect(shouldRequestWslgX11Fallback({ reason: 'launch-failed' }, marked)).toBe(true)
+    expect(shouldRequestWslgX11Fallback({ reason: 'launch-failed' }, {})).toBe(false)
+    expect(shouldRequestWslgX11Fallback({ reason: 'crashed' }, marked)).toBe(false)
+    expect(shouldRequestWslgX11Fallback({ reason: 'killed' }, marked)).toBe(false)
+    expect(shouldRequestWslgX11Fallback(undefined, marked)).toBe(false)
   })
 })

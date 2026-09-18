@@ -507,7 +507,7 @@ import { readWindowsUserEnvVar } from './windows-user-env'
 import { isPackagedInstallPath as isPackagedInstallPathUnderRoots } from './workspace-cwd'
 import { readWslWindowsClipboardImage } from './wsl-clipboard-image'
 import { resolvePickerDefaultPath, setActiveGatewayProfile, setWslBridgeProfileState } from './wsl-path-bridge'
-import { shouldFallbackWslgRenderer, WSLG_X11_FALLBACK_EXIT_CODE, wslgX11FallbackArgs } from './wslg-launch'
+import { shouldRequestWslgX11Fallback, WSLG_X11_FALLBACK_EXIT_CODE } from './wslg-launch'
 
 const USER_DATA_OVERRIDE = process.env.HERMES_DESKTOP_USER_DATA_DIR
 
@@ -14688,32 +14688,23 @@ function createWindow() {
   streamThrottle.register(mainWindow)
   wireCommonWindowHandlers(mainWindow, zoomWiringForWindowKind('chat'))
 
-  let relaunchingForWslgX11Fallback = false
+  // #114615: under WSLg the supervising parent (entry.ts) picked Wayland by
+  // default and marked this child. A renderer that never launches there is a
+  // dead app; hand the process back with WSLG_X11_FALLBACK_EXIT_CODE so the
+  // parent re-execs once on X11. Not app.relaunch(): the parent must stay the
+  // one supervising (it keeps concurrently/Vite alive in dev and owns exit).
+  let wslgX11FallbackRequested = false
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
-    if (relaunchingForWslgX11Fallback || !shouldFallbackWslgRenderer(details)) {
+    if (wslgX11FallbackRequested || !shouldRequestWslgX11Fallback(details, process.env)) {
       return
     }
 
-    const fallbackArgs = wslgX11FallbackArgs(process.argv.slice(1))
-
-    if (!fallbackArgs) {
-      return
-    }
-
-    relaunchingForWslgX11Fallback = true
-    rememberLog('[renderer] WSLg automatic Wayland launch failed; relaunching once with X11')
-
-    try {
-      // The pre-Electron WSLg supervisor owns the replacement process. A
-      // direct app.relaunch() would let that supervisor exit and tear down
-      // Vite during development.
-      void exitAfterBackendShutdown(WSLG_X11_FALLBACK_EXIT_CODE).catch(error => {
-        rememberLog(`[renderer] WSLg fallback backend shutdown failed: ${error?.message || error}`)
-        app.exit(WSLG_X11_FALLBACK_EXIT_CODE)
-      })
-    } catch (error) {
-      rememberLog(`[renderer] WSLg X11 fallback relaunch failed: ${error?.message || error}`)
-    }
+    wslgX11FallbackRequested = true
+    rememberLog('[renderer:main] renderer never launched under default WSLg Wayland; handing back for one X11 relaunch (#114615)')
+    void exitAfterBackendShutdown(WSLG_X11_FALLBACK_EXIT_CODE).catch(error => {
+      rememberLog(`[renderer:main] backend shutdown before the X11 relaunch failed: ${error?.message || error}`)
+      app.exit(WSLG_X11_FALLBACK_EXIT_CODE)
+    })
   })
 
   // Per-window renderer lifecycle diagnostics + recovery (#81290). The reload

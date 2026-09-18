@@ -1,29 +1,15 @@
 import { detectRemoteDisplay, isWslEnvironment } from './bootstrap-platform'
 
-const AUTO_WAYLAND_FLAG = '--hermes-wslg-auto-wayland'
-const X11_FALLBACK_FLAG = '--hermes-wslg-x11-fallback'
+/** Set on the supervised child when Wayland was picked by default, not by a hint. */
+export const WSLG_AUTO_WAYLAND_ENV = 'HERMES_WSLG_AUTO_WAYLAND'
+
+/** Child exit code asking the supervisor for one X11 re-exec: the renderer never launched under Wayland. */
 export const WSLG_X11_FALLBACK_EXIT_CODE = 76
 
-function ozoneHint(argv: readonly string[], env: NodeJS.ProcessEnv): { value: string | undefined; explicit: boolean } {
-  for (let index = argv.length - 1; index >= 0; index -= 1) {
-    const arg = argv[index]
+function ozoneHint(argv: readonly string[], env: NodeJS.ProcessEnv): string | undefined {
+  const hintArg = argv.findLast(arg => arg.startsWith('--ozone-platform-hint='))
 
-    if (arg.startsWith('--ozone-platform-hint=')) {
-      return { value: arg.slice('--ozone-platform-hint='.length), explicit: true }
-    }
-
-    if (arg === '--ozone-platform-hint') {
-      return { value: argv[index + 1], explicit: true }
-    }
-  }
-
-  return env.ELECTRON_OZONE_PLATFORM_HINT
-    ? { value: env.ELECTRON_OZONE_PLATFORM_HINT, explicit: true }
-    : { value: undefined, explicit: false }
-}
-
-function hasOzonePlatform(argv: readonly string[]): boolean {
-  return argv.some(arg => arg === '--ozone-platform' || arg.startsWith('--ozone-platform='))
+  return hintArg?.split('=')[1] ?? env.ELECTRON_OZONE_PLATFORM_HINT
 }
 
 // Ozone is selected before application JavaScript. Never appendSwitch here:
@@ -40,51 +26,33 @@ export function wslgLaunchArgs(
     return null
   }
 
-  if (hasOzonePlatform(argv)) {
+  if (argv.some(arg => arg === '--ozone-platform' || arg.startsWith('--ozone-platform='))) {
     return null
   }
 
-  const hint = ozoneHint(argv, env)
-  const backend = hint.value === 'x11' ? 'x11' : 'wayland'
+  const backend = ozoneHint(argv, env) === 'x11' ? 'x11' : 'wayland'
 
-  return backend === 'wayland' && !hint.explicit
-    ? [...argv, `--ozone-platform=${backend}`, AUTO_WAYLAND_FLAG]
-    : [...argv, `--ozone-platform=${backend}`]
+  return [...argv, `--ozone-platform=${backend}`]
 }
 
 /**
- * Re-exec once on X11 when the automatically selected WSLg Wayland renderer
- * cannot launch. Explicit ozone choices never receive the auto marker, so the
- * fallback cannot override a user or config hint.
+ * The one X11 retry for a supervised launch whose renderer never started
+ * (#114615). Only a default Wayland pick is retried: an explicit hint, from
+ * argv or the config-bridged env, is the user's decision and is kept.
  */
-export function wslgX11FallbackArgs(argv: readonly string[]): string[] | null {
-  if (!argv.includes(AUTO_WAYLAND_FLAG) || argv.includes(X11_FALLBACK_FLAG) || !hasOzonePlatform(argv)) {
+export function wslgX11FallbackArgs(args: readonly string[], env: NodeJS.ProcessEnv): string[] | null {
+  if (!args.includes('--ozone-platform=wayland') || ozoneHint(args, env) === 'wayland') {
     return null
   }
 
-  const next: string[] = []
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index]
-
-    if (arg === AUTO_WAYLAND_FLAG || arg === '--ozone-platform') {
-      if (arg === '--ozone-platform') {
-        index += 1
-      }
-
-      continue
-    }
-
-    if (arg.startsWith('--ozone-platform=')) {
-      continue
-    }
-
-    next.push(arg)
-  }
-
-  return [...next, '--ozone-platform=x11', X11_FALLBACK_FLAG]
+  return args.map(arg => (arg === '--ozone-platform=wayland' ? '--ozone-platform=x11' : arg))
 }
 
-export function shouldFallbackWslgRenderer(details: { reason?: string; exitCode?: number | string | undefined }): boolean {
-  return details.reason === 'launch-failed' && String(details.exitCode) === '1002'
+/**
+ * Child side: a renderer that failed to launch under a default Wayland pick
+ * hands the process back to the supervisor. The X11 retry runs without the
+ * marker, so it can never ask again.
+ */
+export function shouldRequestWslgX11Fallback(details: { reason?: string } | undefined, env: NodeJS.ProcessEnv): boolean {
+  return env[WSLG_AUTO_WAYLAND_ENV] === '1' && details?.reason === 'launch-failed'
 }
