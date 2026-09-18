@@ -47,6 +47,7 @@ def _wire(provider, pool_entries, stored):
     session_db = _SessionDB(dict(stored))
     ctx = types.SimpleNamespace(
         session_id="sess-1",
+        source=types.SimpleNamespace(platform="test"),
         progress_callback=None,
         native_tool_start_callback=None,
         voice_ack_callback=None,
@@ -61,6 +62,7 @@ def _wire(provider, pool_entries, stored):
         session_key="",
         user_config={},
         _thinking_enabled=False,
+        mute_notification_reply=False,
         agent_holder=[None],
         tools_holder=[None],
         process_task_id=None,
