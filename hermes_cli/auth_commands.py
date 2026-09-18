@@ -432,6 +432,29 @@ def _report_priority(provider: str, pool, moved, requested: int, verb: str, prep
               f"fill_first selection.", file=sys.stderr)
 
 
+def auth_rename_command(args) -> None:
+    """`hermes auth rename <provider> <target> <label>`: relabel one pooled credential.
+
+    Labels are what the account menus and status line show, so this is how a
+    user says which subscription a row actually belongs to. Identity is
+    untouched: same id, same tokens, same priority.
+    """
+    provider = _normalize_provider(getattr(args, "provider", ""))
+    pool = load_pool(provider)
+    index, matched, error = pool.resolve_target(getattr(args, "target", None))
+    if matched is None or index is None:
+        raise SystemExit(f"{error} Provider: {provider}.")
+    requested = str(getattr(args, "label", "") or "").strip()
+    if not requested:
+        raise SystemExit("A label cannot be blank.")
+    previous = matched.label
+    renamed = pool.rename_entry(matched.id, requested)
+    if renamed is None:
+        raise SystemExit(f'No credential matching "{getattr(args, "target", None)}" for provider {provider}.')
+    print(f'Renamed {provider} credential "{previous}" to "{renamed.label}" '
+          f"(id={renamed.id}, #{renamed.priority + 1} in `hermes auth list {provider}`)")
+
+
 def auth_priority_command(args) -> None:
     """`hermes auth priority <provider> <target> <priority>`: reorder one pooled credential."""
     provider = _normalize_provider(getattr(args, "provider", ""))
@@ -808,7 +831,8 @@ def auth_upgrade_command(args) -> None:
 
 _AUTH_ACTIONS = {
     "add": auth_add_command, "list": auth_list_command, "remove": auth_remove_command,
-    "reset": auth_reset_command, "priority": auth_priority_command, "refresh": auth_refresh_command, "status": auth_status_command,
+    "reset": auth_reset_command, "priority": auth_priority_command, "rename": auth_rename_command,
+    "refresh": auth_refresh_command, "status": auth_status_command,
     "logout": auth_logout_command, "upgrade": auth_upgrade_command,
     "spotify": auth_spotify_command}
 

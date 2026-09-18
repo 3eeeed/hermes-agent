@@ -849,6 +849,22 @@ def recover_with_credential_pool(
         next_entry = pool.mark_exhausted_and_rotate(**kwargs)
         if next_entry is None:
             return False
+        pinned_credential_id = getattr(agent, "_session_pinned_credential_id", None)
+        if (
+            isinstance(pinned_credential_id, str) and pinned_credential_id
+            and getattr(next_entry, "id", None) != pinned_credential_id
+        ):
+            # The user explicitly picked an account for this chat (desktop account
+            # menu). Exhaustion is still recorded above so its quota reads correctly,
+            # but auto-rotating this session onto a DIFFERENT account would silently
+            # bill someone else's quota for a choice the user made on purpose — surface
+            # the failure instead and let them switch accounts themselves.
+            _ra().logger.info(
+                "Credential %s (%s) — session is pinned to %s; not auto-switching to "
+                "%s, surfacing the failure instead",
+                rotate_status, label, pinned_credential_id, getattr(next_entry, "id", "?"),
+            )
+            return False
         _ra().logger.info(
             "Credential %s (%s) — rotated to pool entry %s",
             rotate_status, label, getattr(next_entry, "id", "?"),
@@ -870,6 +886,13 @@ def recover_with_credential_pool(
             # the fallback's cooldown lifts. Keep the FIRST benched entry across chained
             # rotations — it is the preferred one. Auth benches are not windows; they stay.
             agent._credential_pool_revert_id = credential_id
+        if swapped:
+            callback = getattr(agent, "credential_rotation_callback", None)
+            if callable(callback):
+                try:
+                    callback(next_entry)
+                except Exception:
+                    _ra().logger.debug("credential rotation callback failed", exc_info=True)
         return swapped
     if effective_reason == FailoverReason.upstream_rate_limit:
         # Upstream (e.g. DeepSeek behind OpenRouter) is throttling the aggregator; the credential is

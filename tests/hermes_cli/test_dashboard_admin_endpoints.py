@@ -213,6 +213,194 @@ class TestCredentialPoolEndpoints:
         assert sources == ["env:OPENROUTER_API_KEY", "manual"]
 
 
+    def test_codex_usage_returns_quota_metadata_without_tokens(self, monkeypatch):
+        from datetime import datetime, timezone
+
+        import agent.account_usage as account_usage
+        import agent.credential_pool as credential_pool
+        from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
+        from agent.credential_pool import PooledCredential
+
+        entry = PooledCredential(
+            provider="openai-codex", id="acct-1", label="Account 1", auth_type="oauth",
+            priority=0, source="test", access_token="must-not-cross-api",
+        )
+        monkeypatch.setattr(
+            credential_pool,
+            "load_pool",
+            lambda provider: type("Pool", (), {"entries": lambda self: [entry]})(),
+        )
+        monkeypatch.setattr(
+            account_usage,
+            "fetch_account_usage",
+            lambda provider, **kwargs: AccountUsageSnapshot(
+                provider=provider, source="usage_api", fetched_at=datetime.now(timezone.utc), plan="Pro",
+                windows=(AccountUsageWindow(label="Session", used_percent=25.0),),
+            ),
+        )
+
+        response = self.client.get("/api/credentials/pool/openai-codex/usage")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["provider"] == "openai-codex"
+        assert body["entries"][0]["id"] == "acct-1"
+        assert body["entries"][0]["plan"] == "Pro"
+        assert body["entries"][0]["windows"] == [
+            {"detail": None, "label": "Session", "reset_at": None, "used_percent": 25.0}
+        ]
+        assert "must-not-cross-api" not in response.text
+
+    def test_usage_reports_whether_accounts_can_be_added_when_the_pool_is_empty(self, monkeypatch):
+        """An empty pool must still say that accounts CAN be added.
+
+        Anthropic starts with zero pool entries: Hermes borrows the ambient
+        Claude Code credential and `_seed_anthropic_singletons` deliberately
+        refuses to adopt it until the user explicitly configures the provider.
+        The account menu keys off this endpoint, so without a signal here it
+        renders nothing — and the only way to add the first account is a button
+        inside that menu. That is an unbreakable bootstrap loop.
+        """
+        import agent.credential_pool as credential_pool
+
+        monkeypatch.setattr(
+            credential_pool,
+            "load_pool",
+            lambda provider: type("Pool", (), {"entries": lambda self: []})(),
+        )
+
+        response = self.client.get("/api/credentials/pool/anthropic/usage")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["entries"] == []
+        assert body["can_add_accounts"] is True, (
+            "an empty pool reported no way to add an account: the desktop menu "
+            "hides itself and the user can never reach the add button"
+        )
+
+    def test_codex_usage_and_listing_expose_the_real_account_email(self, monkeypatch):
+        """The account's email (from the token's own claims) must reach both
+        the plain pool listing and the usage endpoint, independent of label.
+
+        Two entries can carry an identical, user-chosen label ("1", "2",
+        "batal" are just display names) -- the email decoded from each
+        token's own OAuth claims is the only thing that tells them apart,
+        so it must be present in the API response, not just internal state.
+        """
+        import base64
+        import json as _json
+        from datetime import datetime, timezone
+
+        import agent.account_usage as account_usage
+        import agent.credential_pool as credential_pool
+        from agent.account_usage import AccountUsageSnapshot
+        from agent.credential_pool import PooledCredential
+
+        def _fake_jwt(email):
+            def _b64(obj):
+                return base64.urlsafe_b64encode(_json.dumps(obj).encode()).decode().rstrip("=")
+            header = _b64({"alg": "none"})
+            payload = _b64({"https://api.openai.com/profile": {"email": email}})
+            return f"{header}.{payload}.sig"
+
+        entry_a = PooledCredential(
+            provider="openai-codex", id="acct-1", label="1", auth_type="oauth",
+            priority=0, source="test", access_token=_fake_jwt("first@example.com"),
+        )
+        entry_b = PooledCredential(
+            provider="openai-codex", id="acct-2", label="1", auth_type="oauth",
+            priority=1, source="test", access_token=_fake_jwt("second@example.com"),
+        )
+        monkeypatch.setattr(
+            credential_pool, "load_pool",
+            lambda provider: type("Pool", (), {"entries": lambda self: [entry_a, entry_b]})(),
+        )
+        import hermes_cli.auth as auth_mod
+        monkeypatch.setattr(auth_mod, "read_credential_pool", lambda: {"openai-codex": [{}, {}]})
+        monkeypatch.setattr(
+            account_usage, "fetch_account_usage",
+            lambda provider, **kwargs: AccountUsageSnapshot(
+                provider=provider, source="usage_api", fetched_at=datetime.now(timezone.utc), plan="Pro",
+            ),
+        )
+
+        listing = self.client.get("/api/credentials/pool").json()
+        codex_entries = next(p for p in listing["providers"] if p["provider"] == "openai-codex")["entries"]
+        assert {e["id"]: e["email"] for e in codex_entries} == {
+            "acct-1": "first@example.com", "acct-2": "second@example.com",
+        }
+
+        usage = self.client.get("/api/credentials/pool/openai-codex/usage").json()
+        assert {e["id"]: e["email"] for e in usage["entries"]} == {
+            "acct-1": "first@example.com", "acct-2": "second@example.com",
+        }
+
+    def test_codex_session_selection_persists_only_redacted_pool_id(self, monkeypatch):
+        import agent.credential_pool as credential_pool
+        import hermes_cli.web_server_sessions as web_sessions
+
+        entry = type("Entry", (), {"id": "acct-batal"})()
+        db = type("Db", (), {
+            "close": lambda self: None,
+            "get_session": lambda self, session_id: {"id": session_id},
+            "get_session_model_config_value": lambda self, session_id, key: vars(self).get("patch", (None, {}))[1].get(key),
+            "patch_session_model_config": lambda self, session_id, patch: setattr(self, "patch", (session_id, patch)),
+            "resolve_session_id": lambda self, session_id: session_id,
+        })()
+        monkeypatch.setattr(credential_pool, "load_pool", lambda provider: type("Pool", (), {"entries": lambda self: [entry]})())
+        monkeypatch.setattr(web_sessions, "_open_session_db_for_profile", lambda profile, read_only: db)
+
+        response = self.client.put(
+            "/api/credentials/pool/openai-codex/session-selection",
+            json={"session_id": "session-1", "credential_id": "acct-batal"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"ok": True, "session_id": "session-1", "credential_id": "acct-batal"}
+        assert vars(db)["patch"] == ("session-1", {"openai_codex_credential_id": "acct-batal"})
+
+    def test_codex_session_selection_read_returns_only_opaque_pool_id(self, monkeypatch):
+        import hermes_cli.web_server_sessions as web_sessions
+
+        db = type("Db", (), {
+            "close": lambda self: None,
+            "get_session": lambda self, session_id: {"id": session_id},
+            "get_session_model_config_value": lambda self, session_id, key: "acct-batal",
+            "resolve_session_id": lambda self, session_id: session_id,
+        })()
+        monkeypatch.setattr(web_sessions, "_open_session_db_for_profile", lambda profile, read_only: db)
+
+        response = self.client.get(
+            "/api/credentials/pool/openai-codex/session-selection?session_id=session-1"
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"session_id": "session-1", "credential_id": "acct-batal"}
+
+    def test_codex_account_delete_uses_stable_pool_id(self, monkeypatch):
+        import agent.credential_pool as credential_pool
+
+        entry = type("Entry", (), {"id": "acct-batal", "source": "manual"})()
+        class Pool:
+            def entries(self):
+                return []
+
+            def remove_index(self, index):
+                assert index == 0
+                return entry
+
+            def resolve_target(self, target):
+                assert target == "acct-batal"
+                return 0, entry, None
+
+        monkeypatch.setattr(credential_pool, "load_pool", lambda provider: Pool())
+
+        response = self.client.delete("/api/credentials/pool/openai-codex/entries/acct-batal")
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert response.json()["provider"] == "openai-codex"
 
 
 class TestMemoryEndpoints:

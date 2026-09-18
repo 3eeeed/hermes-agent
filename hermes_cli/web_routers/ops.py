@@ -15,7 +15,7 @@ import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -26,8 +26,10 @@ from hermes_cli.web_server_files import _path_is_under
 from hermes_cli.web_server_gateway import _restart_gateway_after
 from hermes_cli.web_server_memory import _normalize_memory_provider_name, _require_memory_provider_ready
 from hermes_cli.web_models import (
+    CodexSessionCredentialSelect,
     BackupRequest, CredentialPoolAdd, HookCreate, HookDelete, ImportRequest, MemoryProviderSelect,
-    MemoryReset, PairingApprove, PairingRevoke, WebhookCreate, WebhookEnabledToggle,
+    MemoryReset, PairingApprove, PairingRevoke, PooledCredentialRename, WebhookCreate,
+    WebhookEnabledToggle,
 )
 from hermes_cli.web_routers._common import _CONFIG_MUTATION_LOCK, http_failure, spawn_profile_action
 from hermes_cli.web_routers.files import stream_upload_to_path
@@ -282,6 +284,34 @@ async def stop_gateway(profile: Optional[str] = None):
 # once froze the uvicorn loop for 17 minutes. Every pool load below runs off-loop.
 
 
+def _pool_entry_account_email(entry: Any) -> Optional[str]:
+    """Best-effort account email from the OAuth access token's own claims.
+
+    Distinct accounts can carry an identical, operator-chosen ``label`` (the
+    desktop menu lets any row be renamed to "1"/"2"/"batal"), so the label
+    alone cannot tell two entries apart when auditing which real account is
+    which. The token itself is the only field that cannot lie: OpenAI Codex
+    tokens carry the account's email under the nested
+    ``https://api.openai.com/profile`` claim (not the top-level ``email``
+    claim ``label_from_token`` checks), so it needs its own lookup. Fails
+    open (returns None) for anthropic tokens (no such claim) and any
+    non-JWT / malformed token — this is a display nicety, never load-bearing.
+    """
+    from hermes_cli.auth_constants import _decode_jwt_claims
+
+    token = entry.access_token or ""
+    if not token:
+        return None
+    claims = _decode_jwt_claims(token)
+    profile = claims.get("https://api.openai.com/profile")
+    if isinstance(profile, dict):
+        email = profile.get("email")
+        if isinstance(email, str) and email.strip():
+            return email.strip()
+    email = claims.get("email")
+    return email.strip() if isinstance(email, str) and email.strip() else None
+
+
 def _pool_entry_summary(entry: Any, index: int) -> Dict[str, Any]:
     """Redacted view of one PooledCredential; ``index`` is 1-based to match
     CredentialPool.remove_index()."""
@@ -290,6 +320,7 @@ def _pool_entry_summary(entry: Any, index: int) -> Dict[str, Any]:
         "index": index,
         "id": entry.id,
         "label": entry.label,
+        "email": _pool_entry_account_email(entry),
         "auth_type": entry.auth_type,
         "source": entry.source,
         "priority": entry.priority,
@@ -322,6 +353,153 @@ async def list_credential_pool():
                     "entries": [_pool_entry_summary(e, i) for i, e in enumerate(entries, start=1)],
                 })
         return {"providers": providers}
+
+    return await asyncio.to_thread(_run)
+
+
+_POOL_UI_PROVIDERS = ("openai-codex", "anthropic")
+
+
+def _validated_pool_provider(provider: str) -> str:
+    """Normalize a path provider, rejecting any not managed by the account menu.
+
+    These routes take the provider from the URL, so an allowlist is what stops a
+    caller from reaching pools the account UI does not own.
+    """
+    normalized = (provider or "").strip().lower()
+    if normalized not in _POOL_UI_PROVIDERS:
+        raise HTTPException(status_code=404, detail="Unknown account provider")
+    return normalized
+
+
+def _pool_usage_payload(provider: str) -> Tuple[Callable[[Any], Dict[str, Any]], Callable[[], List[Any]]]:
+    """Build the (per-entry serializer, entry loader) pair for *provider*'s pooled usage."""
+    from agent.account_usage import fetch_account_usage
+    from agent.credential_pool import load_pool
+
+    def _one(entry: Any) -> Dict[str, Any]:
+        try:
+            snapshot = fetch_account_usage(
+                provider, base_url=entry.runtime_base_url, api_key=entry.runtime_api_key,
+            )
+        except Exception:
+            _log.debug("%s usage lookup failed for pool entry %s", provider, entry.id, exc_info=True)
+            snapshot = None
+        if snapshot is None:
+            return {"id": entry.id, "available": False, "label": entry.label, "email": _pool_entry_account_email(entry)}
+        return {
+            "available": snapshot.available,
+            "details": list(snapshot.details),
+            "fetched_at": snapshot.fetched_at.isoformat(),
+            "id": entry.id,
+            "label": entry.label,
+            "email": _pool_entry_account_email(entry),
+            "plan": snapshot.plan,
+            "unavailable_reason": snapshot.unavailable_reason,
+            "windows": [
+                {
+                    "detail": window.detail,
+                    "label": window.label,
+                    "reset_at": window.reset_at.isoformat() if window.reset_at else None,
+                    "used_percent": window.used_percent,
+                }
+                for window in snapshot.windows
+            ],
+        }
+
+    def _entries():
+        try:
+            return list(load_pool(provider).entries())
+        except Exception:
+            _log.exception("load_pool(%s) failed while reading usage", provider)
+            return []
+
+    return _one, _entries
+
+
+@router.get("/api/credentials/pool/{provider}/usage")
+async def list_credential_pool_usage(provider: str):
+    """Per-account quota for any pool-backed provider (Codex, Claude, ...).
+
+    The normal pool endpoint intentionally exposes only operational metadata.
+    The desktop account menu needs the corresponding limits, so resolve each
+    credential server-side and serialize just the usage response. Individual
+    failures fail open: one expired account must not hide the other accounts.
+    """
+    provider = _validated_pool_provider(provider)
+    _one, _entries = _pool_usage_payload(provider)
+    entries = await asyncio.to_thread(_entries)
+    usage = await asyncio.gather(*(asyncio.to_thread(_one, entry) for entry in entries))
+    # Reported even when the pool is empty. Anthropic legitimately starts at
+    # zero: Hermes borrows the ambient Claude Code credential, and the pool
+    # refuses to adopt it until the user explicitly configures the provider
+    # (PR #4210). The desktop menu needs to render its add button in that
+    # state, otherwise the first account can never be added from the UI.
+    return {"provider": provider, "entries": usage, "can_add_accounts": True}
+
+
+@router.put("/api/credentials/pool/{provider}/session-selection")
+async def set_pool_session_credential_selection(provider: str, body: CodexSessionCredentialSelect):
+    """Persist a non-secret pool-entry preference for one stored session."""
+    from agent.credential_pool import POOL_PIN_KEYS, load_pool
+    from hermes_cli.web_server_sessions import _open_session_db_for_profile
+
+    provider = _validated_pool_provider(provider)
+    pin_key = POOL_PIN_KEYS[provider]
+    session_id = body.session_id.strip()
+    credential_id = body.credential_id.strip()
+    if not session_id or not credential_id:
+        raise HTTPException(status_code=400, detail="session_id and credential_id are required")
+
+    def _run():
+        pool = load_pool(provider)
+        if not any(entry.id == credential_id for entry in pool.entries()):
+            raise HTTPException(status_code=404, detail="Account was not found")
+        db = _open_session_db_for_profile(body.profile, read_only=False)
+        try:
+            resolved_id = db.resolve_session_id(session_id)
+            if not resolved_id or not db.get_session(resolved_id):
+                raise HTTPException(status_code=404, detail="Session was not found")
+            db.patch_session_model_config(resolved_id, {pin_key: credential_id})
+            # Read the exact persisted value back before confirming the switch.
+            # A caller must never paint an account as active if a storage write
+            # was ignored by a stale/missing session row.
+            saved_credential_id = db.get_session_model_config_value(resolved_id, pin_key)
+            if saved_credential_id != credential_id:
+                raise HTTPException(status_code=500, detail="Account selection was not persisted")
+            return {"ok": True, "session_id": resolved_id, "credential_id": saved_credential_id}
+        finally:
+            db.close()
+
+    return await asyncio.to_thread(_run)
+
+
+@router.get("/api/credentials/pool/{provider}/session-selection")
+async def get_pool_session_credential_selection(
+    provider: str, session_id: str, profile: Optional[str] = None
+):
+    """Return a session's saved opaque pool id, never credential material."""
+    from agent.credential_pool import POOL_PIN_KEYS
+    from hermes_cli.web_server_sessions import _open_session_db_for_profile
+
+    provider = _validated_pool_provider(provider)
+    pin_key = POOL_PIN_KEYS[provider]
+    session_id = session_id.strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    def _run():
+        db = _open_session_db_for_profile(profile, read_only=True)
+        try:
+            resolved_id = db.resolve_session_id(session_id)
+            if not resolved_id or not db.get_session(resolved_id):
+                raise HTTPException(status_code=404, detail="Session was not found")
+            return {
+                "session_id": resolved_id,
+                "credential_id": db.get_session_model_config_value(resolved_id, pin_key),
+            }
+        finally:
+            db.close()
 
     return await asyncio.to_thread(_run)
 
@@ -384,56 +562,84 @@ async def add_credential_pool_entry(body: CredentialPoolAdd):
     return await asyncio.to_thread(_run)
 
 
-@router.delete("/api/credentials/pool/{provider}/{index}")
-async def remove_credential_pool_entry(provider: str, index: int):
-    """Remove a pool entry (``index`` is 1-based, as listed).
-
-    Removal must be sticky: ``load_pool()`` re-seeds entries from their backing
-    source (.env var, OAuth file, custom-provider config) on every call, so
-    deleting only the row silently reverts on the next refresh. Dispatch through
-    the same RemovalStep registry as ``hermes auth remove``: each source cleans
-    its external state and suppresses ``(provider, source)`` so seeders skip it.
-    Manual entries have no step — nothing external, and they aren't re-seeded.
-
-    See #55217.
-    """
+def _remove_credential_pool_entry(provider: str, target: Any):
+    """Delete one pool entry by its stable id, label, or legacy 1-based index."""
     from agent.credential_pool import load_pool
     from agent.credential_sources import find_removal_step
     from hermes_cli.auth import suppress_credential_source
 
     provider = (provider or "").strip().lower()
+    try:
+        pool = load_pool(provider)
+        index, matched, error = pool.resolve_target(target)
+    except Exception as exc:
+        _log.exception("DELETE /api/credentials/pool failed")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if matched is None or index is None:
+        raise HTTPException(status_code=404, detail=error or "No matching pool entry")
+
+    removed = pool.remove_index(index)
+    if removed is None:
+        raise HTTPException(status_code=404, detail="No matching pool entry")
+
+    cleaned: List[str] = []
+    hints: List[str] = []
+    step = find_removal_step(provider, removed.source or "")
+    if step is not None:
+        try:
+            result = step.remove_fn(provider, removed)
+            cleaned = list(result.cleaned)
+            hints = list(result.hints)
+            if result.suppress:
+                suppress_credential_source(provider, removed.source)
+        except Exception:
+            # Cleanup is best-effort, but suppression is the actual fix —
+            # without it the entry resurrects on the next load_pool().
+            _log.exception("credential source cleanup failed for %s/%s; suppressing anyway", provider, removed.source)
+            try:
+                suppress_credential_source(provider, removed.source)
+            except Exception:
+                _log.exception("suppress_credential_source failed")
+    return {"ok": True, "provider": provider, "count": len(pool.entries()), "cleaned": cleaned, "hints": hints}
+
+
+@router.patch("/api/credentials/pool/{provider}/entries/{credential_id}")
+async def rename_pool_credential_entry(provider: str, credential_id: str, body: PooledCredentialRename):
+    """Relabel an account by its immutable pool id.
+
+    The label is what the account menus show, so this is how a user records
+    which subscription a row belongs to. Identity is untouched: same id, same
+    tokens, same priority — only presentation metadata changes, and the
+    response carries no credential material.
+    """
+    from agent.credential_pool import load_pool
+
+    provider = _validated_pool_provider(provider)
+    label = (body.label or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="A label cannot be blank")
 
     def _run():
-        try:
-            pool = load_pool(provider)
-            removed = pool.remove_index(index)
-        except Exception as exc:
-            _log.exception("DELETE /api/credentials/pool failed")
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if removed is None:
-            raise HTTPException(status_code=404, detail="No pool entry at that index")
-
-        cleaned: List[str] = []
-        hints: List[str] = []
-        step = find_removal_step(provider, removed.source or "")
-        if step is not None:
-            try:
-                result = step.remove_fn(provider, removed)
-                cleaned = list(result.cleaned)
-                hints = list(result.hints)
-                if result.suppress:
-                    suppress_credential_source(provider, removed.source)
-            except Exception:
-                # Cleanup is best-effort, but suppression is the actual fix —
-                # without it the entry resurrects on the next load_pool().
-                _log.exception("credential source cleanup failed for %s/%s; suppressing anyway", provider, removed.source)
-                try:
-                    suppress_credential_source(provider, removed.source)
-                except Exception:
-                    _log.exception("suppress_credential_source failed")
-        return {"ok": True, "provider": provider, "count": len(pool.entries()), "cleaned": cleaned, "hints": hints}
+        renamed = load_pool(provider).rename_entry(credential_id, label)
+        if renamed is None:
+            raise HTTPException(status_code=404, detail="Account was not found")
+        return {"ok": True, "provider": provider, "id": renamed.id, "label": renamed.label}
 
     return await asyncio.to_thread(_run)
+
+
+@router.delete("/api/credentials/pool/{provider}/entries/{credential_id}")
+async def remove_pool_credential_entry(provider: str, credential_id: str):
+    """Delete an account by its immutable pool id, never a mutable row index."""
+    return await asyncio.to_thread(
+        _remove_credential_pool_entry, _validated_pool_provider(provider), credential_id
+    )
+
+
+@router.delete("/api/credentials/pool/{provider}/{index}")
+async def remove_credential_pool_entry(provider: str, index: int):
+    """Legacy 1-based removal endpoint retained for existing dashboard callers."""
+    return await asyncio.to_thread(_remove_credential_pool_entry, provider, index)
 
 
 # --- Memory provider: setup is dashboard-native only via get_config_schema();

@@ -12,6 +12,18 @@ class ConfigUpdate(BaseModel):
     config: dict
     profile: Optional[str] = None
 
+
+class CodexSessionCredentialSelect(BaseModel):
+    session_id: str
+    credential_id: str
+    profile: Optional[str] = None
+
+
+class PooledCredentialRename(BaseModel):
+    """A new display label for one pooled account. Carries no credential material."""
+    label: str
+    profile: Optional[str] = None
+
 class EnvVarUpdate(BaseModel):
     key: str
     value: str

@@ -93,6 +93,92 @@ export interface OAuthProvidersResponse {
   providers: OAuthProvider[]
 }
 
+/** Redacted credential-pool metadata returned by `GET /api/credentials/pool`.
+ * Token material never crosses this boundary. */
+export interface CredentialPoolEntry {
+  auth_type: string
+  /** Account email decoded from the OAuth token's own claims, when the
+   *  provider embeds one (Codex). Independent of `label`, which the user can
+   *  freely rename — this is how two identically-labelled rows are told
+   *  apart. Null for providers/tokens with no such claim. */
+  email?: null | string
+  id: string
+  // Both are Optional[str] on the backend (PooledCredential): an entry that has
+  // never recorded a request answers with null, not an empty string.
+  label: null | string
+  last_status: null | string
+  priority: number
+  request_count: number
+  source: string
+}
+
+export interface CredentialPoolProvider {
+  entries: CredentialPoolEntry[]
+  provider: string
+}
+
+export interface CredentialPoolResponse {
+  providers: CredentialPoolProvider[]
+}
+
+/** Redacted per-account quota metadata. Tokens remain server-side. */
+export interface CredentialPoolUsageWindow {
+  detail: null | string
+  label: string
+  reset_at: null | string
+  used_percent: null | number
+}
+
+export interface CredentialPoolUsageEntry {
+  available: boolean
+  details?: string[]
+  /** Account email decoded from the OAuth token, when the provider embeds
+   *  one (Codex). See `CredentialPoolEntry.email`. */
+  email?: null | string
+  fetched_at?: string
+  id: string
+  label: null | string
+  plan?: null | string
+  unavailable_reason?: null | string
+  windows?: CredentialPoolUsageWindow[]
+}
+
+export interface CredentialPoolUsageResponse {
+  /** False only when the provider cannot accept new accounts at all. Reported
+   *  independently of `entries` so the desktop menu can offer its add button
+   *  while the pool is still empty. */
+  can_add_accounts?: boolean
+  entries: CredentialPoolUsageEntry[]
+  provider: string
+}
+
+/** Result of removing a saved account. Credential material never appears here. */
+export interface CredentialPoolDeleteResponse {
+  count: number
+  ok: boolean
+  provider: string
+}
+
+/** Result of relabelling a saved account. Only presentation metadata changes. */
+export interface CredentialPoolRenameResponse {
+  id: string
+  label: string
+  ok: boolean
+  provider: string
+}
+
+export interface CodexSessionCredentialSelection {
+  credential_id: string
+  ok: boolean
+  session_id: string
+}
+
+/** Opaque per-chat Codex account preference. It carries an internal pool id only. */
+export interface CodexSessionCredentialSelectionState {
+  credential_id: null | string
+  session_id: string
+}
+
 export type OAuthStartResponse =
   | {
       auth_url: string

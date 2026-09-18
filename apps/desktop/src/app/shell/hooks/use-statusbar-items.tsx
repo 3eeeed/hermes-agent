@@ -1,7 +1,9 @@
 import { useStore } from '@nanostores/react'
+import { useQuery } from '@tanstack/react-query'
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router'
 
+import { getCredentialPool } from '@/api/system'
 import { ConnectionSwitcher } from '@/app/chat/sidebar/connection-switcher'
 import { ProfileSwitcher } from '@/app/chat/sidebar/profile-dropdown-switcher'
 import type { CommandCenterSection } from '@/app/command-center'
@@ -9,6 +11,8 @@ import { useApprovalModeStatusbarItem } from '@/app/shell/approval-mode-menu'
 import { ContextUsagePanel } from '@/app/shell/context-usage-panel'
 import { GatewayMenuPanel } from '@/app/shell/gateway-menu-panel'
 import { useContextBreakdown } from '@/app/shell/hooks/use-context-breakdown'
+import { usePooledAccounts } from '@/app/shell/hooks/use-pooled-accounts'
+import { PooledAccountsMenu } from '@/app/shell/pooled-accounts-menu'
 import { useSystemResourcesStatusbarItem } from '@/app/shell/system-resources-statusbar'
 import { $paneVisible, togglePaneVisible } from '@/components/pane-shell/tree/store'
 import { Badge } from '@/components/ui/badge'
@@ -30,10 +34,18 @@ import {
   Zap
 } from '@/lib/icons'
 import { runtimeReadinessDisplay, type RuntimeReadinessResult } from '@/lib/runtime-readiness'
-import { cacheHitLabel, contextBarLabel, LiveDuration, tokensPerSecondLabel, usageContextLabel } from '@/lib/statusbar'
+import {
+  cacheHitLabel,
+  contextBarLabel,
+  LiveDuration,
+  pooledAccountUsageLabel,
+  tokensPerSecondLabel,
+  usageContextLabel
+} from '@/lib/statusbar'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { resolveVersionStatus } from '@/lib/version-status'
+import { $draftAnthropicCredentialSelection, $draftCodexCredentialSelection, setDraftAnthropicCredentialSelection, setDraftCodexCredentialSelection } from '@/store/codex-credential-selection'
 import { copyFilePath, revealFile } from '@/store/file-actions'
 import { $freeTierStatus, FREE_TIER_MODEL } from '@/store/free-tier'
 import { openFreeTierSignIn } from '@/store/free-tier-sign-in'
@@ -110,6 +122,18 @@ export function useStatusbarItems({
   const fileMenu = t.fileMenu
   const primaryActiveSessionId = useStore($activeSessionId)
   const activeGatewayProfile = useStore($activeGatewayProfile)
+
+  // Labels and health only: credentials stay in the gateway. Keep the pool
+  // list fresh enough for an account switch without querying it per render.
+  const credentialPool = useQuery({
+    enabled: gatewayState === 'open',
+    queryFn: () => getCredentialPool(activeGatewayProfile || undefined),
+    queryKey: ['credential-pool', activeGatewayProfile],
+    refetchInterval: 60_000,
+    retry: false,
+    staleTime: 60_000
+  })
+
   // What the button paints and flips is whether the terminal is ON SCREEN —
   // the takeover store alone stays true behind a stacked sibling tab or a
   // minimized zone, which lit the button for a pane the user couldn't see.
@@ -162,6 +186,35 @@ export function useStatusbarItems({
   // clicking into a tile makes the statusbar describe THAT session.
   const focusedStoredSessionId = useStore($focusedStoredSessionId)
   const focusedRuntimeId = useStore($focusedRuntimeId)
+  const draftCodexCredentialSelection = useStore($draftCodexCredentialSelection)
+  const draftAnthropicCredentialSelection = useStore($draftAnthropicCredentialSelection)
+
+  const codex = usePooledAccounts({
+    activeGatewayProfile,
+    credentialPool,
+    draftCredentialId: draftCodexCredentialSelection?.credentialId ?? null,
+    enabled: gatewayState === 'open',
+    focusedStoredSessionId,
+    onDraftSelect: credentialId => setDraftCodexCredentialSelection({
+      credentialId,
+      profile: activeGatewayProfile || null
+    }),
+    provider: 'openai-codex'
+  })
+
+  const anthropic = usePooledAccounts({
+    activeGatewayProfile,
+    credentialPool,
+    draftCredentialId: draftAnthropicCredentialSelection?.credentialId ?? null,
+    enabled: gatewayState === 'open',
+    focusedStoredSessionId,
+    onDraftSelect: credentialId => setDraftAnthropicCredentialSelection({
+      credentialId,
+      profile: activeGatewayProfile || null
+    }),
+    provider: 'anthropic'
+  })
+
   // `$focusedSessionState` is a projection of `$sessionStates`, which is
   // republished on EVERY message delta — tens of times a second during a turn.
   // Only the fields read here are selected, so an unchanged readout bails out
@@ -612,7 +665,51 @@ export function useStatusbarItems({
   )
 
   const coreRightStatusbarItems = useMemo<readonly StatusbarItem[]>(
-    () => [
+    () => {
+      // Both pools stay in the status line regardless of the focused chat's
+      // provider, so Claude and GPT accounts (and their quota) are always
+      // visible — not just the one currently serving the focused chat.
+      const poolDefs = [
+        { controller: codex, id: 'codex-accounts', short: 'Codex', title: 'OpenAI Codex accounts', toggle: 'GPT accounts' },
+        { controller: anthropic, id: 'anthropic-accounts', short: 'Claude', title: 'Anthropic accounts', toggle: 'Claude accounts' }
+      ]
+
+      const accountItems: StatusbarItem[] = []
+
+      for (const pool of poolDefs) {
+        if (!(pool.controller.accounts.length || pool.controller.canAddAccounts)) {
+          continue
+        }
+
+        const activeEntry = pool.controller.accounts.find(entry => entry.id === pool.controller.activeCredentialId)
+
+        const accountLabel = activeEntry
+          ? pool.controller.labelFor(activeEntry, pool.controller.accounts.indexOf(activeEntry))
+          : null
+
+        const usage = activeEntry ? pool.controller.usageById.get(activeEntry.id) : null
+
+        const label = accountLabel
+          ? pooledAccountUsageLabel(pool.short, accountLabel, usage?.windows)
+          : pool.controller.accounts.length
+            ? `${pool.short} · Select account`
+            : `${pool.short} · Add account`
+
+        accountItems.push({
+          icon: <Hash className="size-3" />,
+          id: pool.id,
+          label,
+          menuAlign: 'end',
+          menuClassName: 'w-80 border-(--ui-stroke-secondary) p-2',
+          menuContent: <PooledAccountsMenu controller={pool.controller} focusedStoredSessionId={focusedStoredSessionId} />,
+          title: pool.title,
+          toggleLabel: pool.toggle,
+          variant: 'menu'
+        })
+      }
+
+      return [
+        ...accountItems,
       {
         detail: <LiveDuration since={turnStartedAt} />,
         hidden: !busy || !turnStartedAt,
@@ -683,7 +780,8 @@ export function useStatusbarItems({
       },
       clientVersionItem,
       ...(backendVersionItem ? [backendVersionItem] : [])
-    ],
+      ]
+    },
     [
       approvalModeItem,
       backendVersionItem,
@@ -691,11 +789,14 @@ export function useStatusbarItems({
       cacheHit,
       chatOpen,
       clientVersionItem,
+      anthropic,
+      codex,
       contextBar,
       contextBreakdown,
       contextBreakdownLoading,
       contextUsage,
       copy,
+      focusedStoredSessionId,
       gaugeUsage,
       sessionStartedAt,
       gatewayState,

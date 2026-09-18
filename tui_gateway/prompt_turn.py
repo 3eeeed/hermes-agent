@@ -560,6 +560,83 @@ def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images
     return prompt, _prepend_note(run_message, _hud_surface_note(session)), cols, streamer
 
 
+def _apply_session_credential_selection(session: dict, agent) -> None:
+    """Apply the desktop's persisted account before dispatch, including cached agents."""
+    from agent.credential_pool import POOL_PIN_KEYS
+
+    pool = getattr(agent, "credential_pool", None) or getattr(agent, "_credential_pool", None)
+    provider = getattr(agent, "provider", None) or getattr(pool, "provider", "")
+    pin_key = POOL_PIN_KEYS.get(provider)
+    if not pin_key:
+        return
+    session_key = _session_lookup_key(session)
+    with _session_db(session) as db:
+        if db is None:
+            raise RuntimeError("Cannot verify the selected account: session database unavailable.")
+        selected_id = db.get_session_model_config_value(session_key, pin_key)
+    if selected_id:
+        entry = next((e for e in pool.entries() if e.id == selected_id), None) if pool else None
+        if entry is None:
+            raise RuntimeError("The selected account is unavailable. Select an account again before sending.")
+        if not agent._swap_credential(entry):
+            raise RuntimeError("The selected account could not be activated. No request was sent.")
+        logger.info("Session credential activated: session=%s provider=%s credential_id=%s",
+                    session_key, provider, entry.id)
+        session["_turn_pool_credential"] = (provider, entry.id)
+    else:
+        session["_turn_pool_credential"] = (provider, getattr(agent, "_credential_pool_entry_id", None))
+
+    def persist_rotation(entry):
+        # Resolve the live key again: compression can move the conversation to a descendant.
+        with _session_db(session) as db:
+            if db is None:
+                raise RuntimeError("Cannot persist the replacement account: session database unavailable.")
+            db.patch_session_model_config(_session_lookup_key(session), {pin_key: entry.id})
+
+    agent.credential_rotation_callback = persist_rotation
+
+
+def _compact_on_account_change(sid: str, session: dict, agent) -> None:
+    """Compact the transcript when the pinned pool account differs from the one that served the
+    previous turn. A long history sent to a new account is written to that account's prompt cache
+    at full price (and again next turn until the cache warms); one summary is far cheaper. The
+    served account is persisted in the session's model_config so the baseline survives a backend
+    restart or resume; the first turn ever only records it. A failed compaction never blocks."""
+    current = session.pop("_turn_pool_credential", None)
+    if not current or not current[1]:
+        return
+    from agent.credential_pool import SERVED_POOL_CREDENTIAL_KEY
+    marker = f"{current[0]}:{current[1]}"
+    session_key = _session_lookup_key(session)
+    previous = session.get("active_pool_credential")
+    if previous is None:
+        with _session_db(session) as db:
+            previous = db.get_session_model_config_value(session_key, SERVED_POOL_CREDENTIAL_KEY) if db else None
+    session["active_pool_credential"] = marker
+    if previous != marker:
+        with _session_db(session) as db:
+            if db is not None:
+                db.patch_session_model_config(session_key, {SERVED_POOL_CREDENTIAL_KEY: marker})
+    if previous is None or previous == marker:
+        return
+    logger.info("Pool account changed for session=%s (%s -> %s): compacting before dispatch",
+                session_key, previous, marker)
+    _status_update(sid, "compressing", "⠋ compacting history for the newly selected account…")
+    try:
+        removed, _usage = _compress_session_history(session)
+        _sync_session_key_after_compress(sid, session, clear_pending_title=False, restart_slash_worker=True)
+        if removed:
+            _emit("session.info", sid, _session_info(agent, session))
+            # Compression rotates the session id: re-stamp the marker on the live row.
+            with _session_db(session) as db:
+                if db is not None:
+                    db.patch_session_model_config(_session_lookup_key(session), {SERVED_POOL_CREDENTIAL_KEY: marker})
+    except Exception as exc:
+        logger.warning("Account-switch compaction skipped for %s: %s", sid, exc)
+    finally:
+        _status_update(sid, "ready")
+
+
 def _invoke_agent(
     sid: str, session: dict, st: _TurnRun, prompt: Any, run_message: Any, streamer,
     images: list[str], display_kind: str | None, display_metadata: dict | None,
@@ -567,6 +644,12 @@ def _invoke_agent(
     """Wire the streaming callbacks and run the conversation into ``st.result``.
     ``text`` is the turn's raw submit, matched against the row staged by prompt.submit."""
     agent = st.agent
+    _apply_session_credential_selection(session, agent)
+    _compact_on_account_change(sid, session, agent)
+    # Re-snapshot: compaction may have replaced session["history"].
+    with session["history_lock"]:
+        st.history = list(session["history"])
+        st.history_version = int(session.get("history_version", 0))
     # Bot Chat mirrors gateway.stream_consumer: deltas are withheld while the streamed buffer
     # could still resolve to a silence marker ("NO"->"NO_REPLY"), so a bare marker is never
     # shown and then retracted (the client keeps streamed text when message.complete is "").
