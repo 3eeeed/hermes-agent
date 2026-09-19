@@ -152,7 +152,6 @@ export function PooledAccountsMenu({
                   // rather than an empty box.
                   setRenameCandidate({ id: entry.id, label })
                 }}
-                title={`Rename ${label}`}
                 type="button"
               >
                 <Pencil className="size-3" />
@@ -166,7 +165,6 @@ export function PooledAccountsMenu({
                   setRenameCandidate(null)
                   setDeleteCandidate({ id: entry.id, label })
                 }}
-                title={`Remove ${label}`}
                 type="button"
               >
                 <X className="size-3" />
