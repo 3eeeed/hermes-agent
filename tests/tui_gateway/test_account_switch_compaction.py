@@ -91,6 +91,21 @@ def test_change_detected_after_backend_restart(wired):
     compress.assert_called_once()
 
 
+def test_provider_switch_replaces_stale_served_marker(wired):
+    """A stale Claude marker cannot survive after the session switches to Codex."""
+    session, agent, db, compress, _sync = wired
+    db.values[SERVED] = "anthropic:second"
+    agent.provider = "openai-codex"
+    agent._credential_pool.provider = "openai-codex"
+
+    _turn(session, agent)
+
+    compress.assert_called_once()
+    assert session["active_pool_credential"] == "openai-codex:first"
+    assert db.values[SERVED] == "openai-codex:first"
+    assert db.pin_reads[-1] == ("stored-session", "openai_codex_credential_id")
+
+
 def test_same_account_does_not_compact(wired):
     session, agent, db, compress, _sync = wired
     _turn(session, agent)
