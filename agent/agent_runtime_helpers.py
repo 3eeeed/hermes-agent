@@ -885,7 +885,7 @@ def recover_with_credential_pool(
             # session does too (#114501). Only when the benched entry OUTRANKS the one we rotated
             # to: a session that was already on the fallback (preferred benched elsewhere) and
             # rotates UP once the preferred window reopened must not be pulled back down when
-            # fallback's cooldown lifts. Keep the FIRST benched entry across chained
+            # the fallback's cooldown lifts. Keep the FIRST benched entry across chained
             # rotations — it is the preferred one. Auth benches are not windows; they stay.
             agent._credential_pool_revert_id = credential_id
         if swapped:
