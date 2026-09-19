@@ -64,6 +64,23 @@ def test_no_pin_keeps_default_and_wires_rotation(selection):
     db.patch_session_model_config.assert_called_once()
 
 
+def test_pinned_credential_id_is_remembered_on_the_agent(selection):
+    """Regression for #116402: the desktop dispatch path applied the pin but
+    never set `_session_pinned_credential_id`, so recover_with_credential_pool's
+    guard saw no pin and silently rotated a dead/rate-limited pinned account
+    onto a different one instead of surfacing the failure."""
+    session, agent, db, entries = selection
+    server._apply_session_credential_selection(session, agent)
+    assert agent._session_pinned_credential_id == "chosen"
+
+
+def test_no_pin_clears_the_remembered_credential_id(selection):
+    session, agent, db, entries = selection
+    db.get_session_model_config_value.return_value = None
+    server._apply_session_credential_selection(session, agent)
+    assert agent._session_pinned_credential_id is None
+
+
 def test_invoke_stops_before_conversation_when_selection_fails(selection):
     session, agent, db, entries = selection
     agent.run_conversation = Mock()
