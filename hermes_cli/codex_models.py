@@ -161,12 +161,10 @@ def _fetch_models_from_api(access_token: str) -> List[str]:
         acct_id = _extract_chatgpt_account_id(access_token)
         if acct_id:
             headers["ChatGPT-Account-Id"] = acct_id
-        from agent.model_metadata import CODEX_MODELS_CATALOG_URL
-        resp = httpx.get(CODEX_MODELS_CATALOG_URL, headers=headers, timeout=10)
-        if resp.status_code != 200:
-            return []
-        data = resp.json()
-        entries = data.get("models", []) if isinstance(data, dict) else []
+        from agent.model_metadata import fetch_codex_catalog_entries
+        entries, _status = fetch_codex_catalog_entries(
+            lambda url: httpx.get(url, headers=headers, timeout=10)
+        )
     except Exception as exc:
         logger.debug("Failed to fetch Codex models from API: %s", exc)
         return []
