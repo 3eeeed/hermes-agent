@@ -55,6 +55,7 @@ def _compute_host_turn_frame(
         history = list(session.get("history", []))
         history_version = int(session.get("history_version", 0))
         attached_images = list(image_paths if image_paths is not None else session.get("attached_images", []))
+        submit_user_row = session.get("_submit_user_row")
     return {
         "type": "turn.start", "sid": sid, "request_id": rid,
         "session_key": session.get("session_key") or sid, "text": text,
@@ -77,6 +78,7 @@ def _compute_host_turn_frame(
         "reasoning_config_override": session.get("create_reasoning_override"),
         "service_tier_override": session.get("create_service_tier_override"),
         "source": _session_source(session), "attached_images": attached_images,
+        **({"submit_user_row": dict(submit_user_row)} if isinstance(submit_user_row, dict) else {}),
         "auth_user_id": _session_auth_user_id(session),
         "queued_prompt_generation": queued_prompt_generation,
         # #101416: vouch that this process already holds the registry lease for this session, so
@@ -275,6 +277,8 @@ def _on_compute_host_turn_done(rid: str, sid: str, session: dict, frame: dict) -
     # (kept on error so the fail-open in-process path can still apply it).
     if frame.get("type") != "turn.error":
         session.pop("pending_model_switch", None)
+    # The child has stopped writing, so the chat is movable again (see _finish_session_turn).
+    _finish_session_turn(sid, session)
     if frame.get("type") == "turn.error":
         message = str(frame.get("message") or "compute host turn failed")
         _emit("message.complete", sid, {"text": f"Error: {message}", "status": "error"})
@@ -290,7 +294,10 @@ def _on_compute_host_turn_done(rid: str, sid: str, session: dict, frame: dict) -
 def _submit_prompt_to_compute_host(
     rid: str, sid: str, session: dict, text: Any, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None, display_kind: str | None = None,
-    display_metadata: dict | None = None) -> dict:
+    display_metadata: dict | None = None, caller_owns_reservation: bool = False) -> dict:
+    """Dispatch one turn to the compute host. ``caller_owns_reservation`` says the CALLER already
+    holds this turn's registry reservation (``prompt.submit`` locks it in before dispatching) and
+    keeps owning it on failure — see the except below."""
     cfg = _load_dashboard_process_isolation_config()
     frame = _compute_host_turn_frame(rid, sid, session, text, image_paths=image_paths,
                                      queued_prompt_generation=queued_prompt_generation,
@@ -298,6 +305,13 @@ def _submit_prompt_to_compute_host(
     # Caller JSON-RPC ids may repeat across sockets and turns. Use an opaque
     # dispatch lifetime token, installed before a fast child can send activity.
     turn_id = frame["turn_id"] = frame["request_id"] = uuid.uuid4().hex
+    # The REAL lease stays in this parent while the CHILD runs the turn (the child gets an inert
+    # borrowed token, see _install_borrowed_lease), so the parent is the only process that can
+    # publish this turn to the shared registry. Without it a queued drain routed to the compute
+    # host would look idle to another device mid-write.
+    if (ownership_refusal := _reserve_session_turn(sid, session)) is not None:
+        return _err(rid, 4090, str(ownership_refusal),
+                    {"reason": getattr(ownership_refusal, "reason", "") or ""})
     with session["history_lock"]:
         session["_compute_host_turn_id"] = turn_id
         session.pop("_compute_host_activity_ns", None)
@@ -319,9 +333,23 @@ def _submit_prompt_to_compute_host(
             if session.get("_compute_host_turn_id") == turn_id:
                 session.pop("_compute_host_turn_id", None)
                 session.pop("_compute_host_activity_ns", None)
+        # No child will ever report this turn done, so nothing downstream would clear the
+        # reservation taken above — unless the caller is still holding one of its own. The
+        # reservation here is IDEMPOTENT, not refcounted (same turn token), so finishing it
+        # clears the caller's marker too: prompt.submit's inline fallback would then persist
+        # the durable user row and start its worker on a chat the registry advertises as
+        # idle, and another device's claim commits in that gap. A caller that owns the
+        # reservation keeps it and releases it when its own turn ends; only a dispatch that
+        # reserved for itself gives the marker back, so the chat is not left advertising a
+        # turn that never started.
+        if not caller_owns_reservation:
+            _finish_session_turn(sid, session)
         return _err(rid, 5019, f"compute-host dispatch failed: {exc}")
     with session["history_lock"]:
         session["_compute_host_active"] = True
+        # The accepted child now owns this exact durable row. Keeping it in the
+        # parent would let a later inline turn adopt stale user content.
+        session.pop("_submit_user_row", None)
         if image_paths is None:
             session["attached_images"] = []
     return _ok(rid, {"status": "streaming", "turn_isolation": True})

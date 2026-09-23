@@ -216,6 +216,16 @@ def _drop_queued_duplicates_of_inflight_user(session: dict) -> None:
     _ac_set_queue(session, [c for c in cleaned if c is not None])
 
 
+def _ac_restore_queued(session: dict, queued: dict) -> None:
+    """Put a claimed-but-undispatched envelope back at the head of the queue, byte for byte.
+
+    ``queued`` goes first and whatever advanced into the slot behind it, so a follow-up that
+    arrived while the drain was in flight keeps its place instead of overtaking the message
+    the user sent earlier. Caller holds ``history_lock``."""
+    advanced = session.get("queued_prompt")
+    _ac_set_queue(session, [queued, *([advanced] if advanced else []), *(session.get("queued_prompts") or [])])
+
+
 def _ac_set_queue(session: dict, entries: list) -> None:
     """Write ``entries`` back as queued_prompt (head) + queued_prompts (rest)."""
     session["queued_prompt"] = entries[0] if entries else None
@@ -403,7 +413,7 @@ def _replace_queued_user_row_for_turn(session: dict, queued: dict, is_dispatchin
 
 def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any, queued: bool = False,
                         turn_author: dict | None = None, display_kind: str | None = None,
-                        execution_spec=None) -> dict | None:
+                        execution_spec=None, accept_send=None, bind_send_row=None) -> dict | None:
     """Apply ``display.busy_input_mode`` to a mid-turn prompt instead of rejecting it (rejection made clients busy-retry
     and drop sends): ``interrupt`` (default) → redirect, falling back to hard interrupt + queue; ``queue`` → queue only;
     ``steer`` → inject after the current atomic action. ``queued=True`` (client queue drain) forces queue mode: a "run
@@ -422,6 +432,10 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
             return None  # turn ended since prompt.submit's busy check; caller retries on the idle session
         # Typed while the turn ran, in any busy mode: the running turn no longer counts as unattended.
         session["_turn_user_input"] = True
+        # Exactly-once acceptance must commit before this path consumes images,
+        # steers the live agent, queues text, or interrupts anything.
+        if accept_send is not None:
+            accept_send({"status": "queued"})
         image_paths = list(session.get("attached_images", []))
         if image_paths:
             session["attached_images"] = []  # claim now so a later paste isn't consumed when the turn yields
@@ -449,6 +463,9 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
         # backend restart cannot lose it. Lives on the envelope, never the shared session slot.
         if envelope is not None:
             _persist_queued_user_row(session, envelope, display_kind)
+            staged_row = envelope.get("_submit_user_row") or {}
+            if bind_send_row is not None and isinstance(staged_row.get("_row_id"), int):
+                bind_send_row(staged_row["_row_id"])
         session["last_active"] = time.time()
     # Attachments need their own model invocation: queue without cancelling so the user gets both results in order.
     # ``steer`` must NEVER escalate to a hard interrupt: it would kill the live turn AND drop ``AIAgent._pending_steer``
@@ -468,6 +485,16 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     with _session_turn_admission(session) as admitted:
         if not admitted or session.get("_closing") or not (queued := session.get("queued_prompt")) or session.get("running"):
             return False
+        # Re-prove ownership and publish this turn BEFORE the queue, the running flag or the
+        # transport pin move. A queued prompt is the user's words waiting for the previous turn
+        # to end; dequeuing first meant a handoff landing in the gap left them nowhere at all —
+        # out of the queue, never dispatched, an error event the only trace. Reserved first, a
+        # lost race costs nothing: the words stay queued and the drain simply refuses.
+        if (ownership_refusal := _reserve_session_turn(sid, session)) is not None:
+            logger.info("Queued prompt for %s not drained: %s", session.get("session_key") or sid,
+                        getattr(ownership_refusal, "reason", None) or "refused")
+            _emit("error", sid, {"message": str(ownership_refusal)})
+            return False
         queue_generation = int(session.get("_queued_prompt_generation", 0))
         _ac_set_queue(session, session.get("queued_prompts") or [])
         session["running"] = True
@@ -479,15 +506,18 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         if queued_transport is not None and not _transport_is_dead(queued_transport):
             _attach_session_transport(session, queued_transport)
     use_compute_host = _session_uses_compute_host(session)
+    cancelled_by_generation = False
     with session["history_lock"]:
         if int(session.get("_queued_prompt_generation", 0)) != queue_generation:
             # Generation bump cancelled the claim (Stop, compress re-anchor, …): don't dispatch, but restore the
             # envelope (claimed head first, then whatever advanced into the slot) so a legitimate follow-up isn't dropped.
             # See #84417.
-            advanced = session.get("queued_prompt")
-            _ac_set_queue(session, [queued, *([advanced] if advanced else []), *(session.get("queued_prompts") or [])])
+            _ac_restore_queued(session, queued)
             session["running"] = False
-            return True
+            cancelled_by_generation = True
+    if cancelled_by_generation:
+        _finish_session_turn(sid, session)  # reserved above; no turn will run under it
+        return True
     kwargs: dict = {"queued_prompt_generation": queue_generation}
     # A Normal envelope must not inherit the preceding turn's mode; a moded one carries its own spec.
     from tui_gateway.prompt_execution_modes import stage_execution_spec
@@ -520,7 +550,18 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     dispatch_failed = False
     try:
         if not use_compute_host:
-            _run_prompt_submit(rid, sid, session, queued["text"], **kwargs, **author_kwargs)
+            started = _run_prompt_submit(rid, sid, session, queued["text"], **kwargs, **author_kwargs)
+            # Admission may fail after the head was dequeued (ownership fencing,
+            # generation cancellation, agent/build failure, or any future gate).
+            # No false result owns the envelope: restore it before publishing idle.
+            if not started:
+                session.pop("_turn_ownership_refused", None)
+                with session["history_lock"]:
+                    session.pop("_submit_user_row", None)
+                    _ac_restore_queued(session, queued)
+                    session["running"] = False
+                    _clear_inflight_turn(session)
+                dispatch_failed = True
         elif "execution_spec" in kwargs:
             # Agent modes run in this process only (the orchestrator is the session agent).
             with session["history_lock"]:
@@ -528,21 +569,29 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
                 _clear_inflight_turn(session)
             _emit("error", sid, {"message": "Agent modes are unavailable while dashboard.turn_isolation is on"})
             dispatch_failed = True
-        elif (resp := _submit_prompt_to_compute_host(rid, sid, session, queued["text"], **kwargs)).get("error"):
+        elif (resp := _submit_prompt_to_compute_host(
+                rid, sid, session, queued["text"], caller_owns_reservation=True, **kwargs)).get("error"):
             with session["history_lock"]:
+                session.pop("_submit_user_row", None)
+                _ac_restore_queued(session, queued)
                 session["running"] = False
                 _clear_inflight_turn(session)
             _emit("error", sid, {"message": str((resp.get("error") or {}).get("message") or "queued prompt failed")})
             dispatch_failed = True
     except Exception as exc:
         _notif_log_failure("queued prompt dispatch failed", exc)
-        _notif_release_turn(session)
+        with session["history_lock"]:
+            session.pop("_submit_user_row", None)
+            _ac_restore_queued(session, queued)
+            session["running"] = False
+            _clear_inflight_turn(session)
+        _emit("error", sid, {"message": f"queued prompt failed: {exc}"})
         dispatch_failed = True
     if dispatch_failed:
-        with session["history_lock"]:
-            drain_next = bool(session.get("queued_prompt")) and not session.get("_turn_cancel_requested")
-        if drain_next:
-            _drain_queued_prompt(rid, sid, session)
+        # The drain owns the idempotent shared reservation. Restore every local
+        # mutation first, then release it exactly once; never recurse into the
+        # next envelope after losing the head.
+        _finish_session_turn(sid, session)
     return True
 
 

@@ -42,6 +42,8 @@ def test_refused_input_commits_failed_mailbox_receipt(tmp_path):
         "_clear_inflight_turn": noop,
         # Hosted room member sessions drop their bot_room slot at turn end (#106847); a canonical chat is not one.
         "_release_hosted_room_turn_slot": noop,
+        # End of turn clears the shared-registry turn marker, so another device may be handed the chat.
+        "_finish_session_turn": noop,
         "_retire_turn_marker": lambda *args: retired.append(args),
         "_emit_settled_session_info": noop,
         "_routing_provenance_db": lambda _session: contextlib.nullcontext(None),

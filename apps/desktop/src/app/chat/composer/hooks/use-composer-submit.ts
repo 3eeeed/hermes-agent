@@ -10,6 +10,7 @@ import { isTouchInteraction } from '@/lib/touch-interaction'
 import type { BusyInputMode } from '@/store/busy-input-mode'
 import { hasClarifyRequest, skipClarifyRequest } from '@/store/clarify'
 import {
+  clearSessionDraft,
   type ComposerAttachment,
   freezeComposerTransportPayload,
   isFreshDraftScope,
@@ -24,6 +25,7 @@ import { notify } from '@/store/notifications'
 import { isOnboardingChat } from '@/store/onboarding-session'
 import { answerParkedCard, skipParkedCards, yieldParkedCardsToMessage } from '@/store/parked-card-answers'
 import { hasBlockingPromptRequest } from '@/store/prompts'
+import { onSessionMoveSendAccepted, pendingSessionMoves } from '@/store/session-move'
 
 import { cloneAttachments, type QueueEditState } from '../composer-utils'
 import { onComposerSubmitRequest } from '../focus'
@@ -123,6 +125,51 @@ export function useComposerSubmit({
   const { t } = useI18n()
   const copy = t.desktop
 
+  const restoredRefusedDraft = useRef<null | { attemptId: null | string; scope: string | null; text: string }>(null)
+
+  // Move here may accept a send after the ordinary submit path restored its
+  // rejected draft. Track that exact restoration. Any real user input retires
+  // the marker, even if they eventually type the same words again, so replay
+  // cleanup can never erase a newer draft.
+  useLayoutEffect(() => {
+    const editor = editorRef.current
+
+    if (!editor) {
+      return
+    }
+
+    const invalidate = () => {
+      restoredRefusedDraft.current = null
+    }
+
+    editor.addEventListener('input', invalidate)
+
+    return () => editor.removeEventListener('input', invalidate)
+  }, [editorRef])
+
+  useLayoutEffect(
+    () =>
+      onSessionMoveSendAccepted(({ attemptId, storedSessionId, text }) => {
+        const restored = restoredRefusedDraft.current
+
+        if (
+          !restored ||
+          restored.attemptId !== attemptId ||
+          restored.scope !== storedSessionId ||
+          restored.text !== text ||
+          activeQueueSessionKeyRef.current !== storedSessionId ||
+          draftRef.current !== text
+        ) {
+          return
+        }
+
+        restoredRefusedDraft.current = null
+        clearDraft()
+        clearSessionDraft(storedSessionId)
+      }),
+    [activeQueueSessionKeyRef, clearDraft, draftRef]
+  )
+
   // Shared send primitive: fire onSubmit, and if the gateway rejects (accepted
   // === false) or throws, re-stash the draft so the words survive. Repaint it
   // only while the same session still owns the visible composer; a late reject
@@ -144,6 +191,8 @@ export function useComposerSubmit({
 
     let restoreScope = submittedScope
     const submittedAttachments = attachments ?? []
+    const attemptsBeforeDispatch = new Set(pendingSessionMoves(submittedScope).map(attempt => attempt.attemptId))
+    restoredRefusedDraft.current = null
 
     let outgoing: OutgoingSend | undefined
 
@@ -178,6 +227,14 @@ export function useComposerSubmit({
       if ((isFreshDraftScope(draftScopeRef.current) ? null : draftScopeRef.current) === restoreScope) {
         loadIntoComposer(text, submittedAttachments)
       }
+
+      const refusedAttempt = [...pendingSessionMoves(restoreScope)]
+        .reverse()
+        .find(attempt => attempt.text === text && !attemptsBeforeDispatch.has(attempt.attemptId))
+
+      // Null is intentionally fail-closed: without an occurrence identity, a later
+      // acceptance for equal text is not proof that it owns this restoration.
+      restoredRefusedDraft.current = { attemptId: refusedAttempt?.attemptId ?? null, scope: restoreScope, text }
     }
 
     // A hidden submit is machine text (a setup note, never something the user

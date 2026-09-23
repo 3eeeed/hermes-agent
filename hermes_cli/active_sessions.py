@@ -112,6 +112,12 @@ MAX_CONCURRENT_SESSIONS = "MAX_CONCURRENT_SESSIONS"
 # call for different operator action, and collapsing the second into a silent go-ahead is exactly the
 # fail-open hole that let two writers share one session (#94595 review, blocker 2).
 SESSION_COORDINATION_UNAVAILABLE = "SESSION_COORDINATION_UNAVAILABLE"
+# Handoff refusals. The claimant's observation no longer describes the live owner
+# (another device claimed first, the owner rotated, the claim was replayed), or the
+# owner is mid-turn. Both are RETRYABLE by re-observing — unlike SESSION_NOT_OWNED,
+# they say "your evidence is out of date", not "you may never write here".
+SESSION_HANDOFF_STALE = "SESSION_HANDOFF_STALE"
+SESSION_HANDOFF_BUSY = "SESSION_HANDOFF_BUSY"
 
 # Advertised through the gateway. A module constant, not a config flag: it holds
 # because try_acquire_active_session checks atomically, so it cannot drift from the
@@ -120,19 +126,27 @@ PER_SESSION_EXCLUSIVE_SUBMIT = True
 
 
 class ActiveSessionRefusal(str):
-    """Refusal message (a ``str``, so callers are untouched) with a machine-readable ``reason``."""
+    """Refusal message (a ``str``, so callers are untouched) with a machine-readable ``reason``.
+
+    ``ownership`` is the live owner's handoff precondition (``ActiveSessionOwner.as_wire``)
+    when one was observed while refusing — what a claimant needs to offer "move it here".
+    """
 
     reason: str
+    ownership: Optional[dict[str, Any]]
 
-    def __new__(cls, message: str, reason: str) -> ActiveSessionRefusal:
+    def __new__(
+        cls, message: str, reason: str, ownership: Optional[dict[str, Any]] = None
+    ) -> "ActiveSessionRefusal":
         obj = super().__new__(cls, message)
         obj.reason = reason
+        obj.ownership = ownership
         return obj
 
     def __getnewargs_ex__(self) -> tuple[tuple[str, str], dict[str, Any]]:
-        # copy/pickle rebuild via __new__: without the reason, publishing a refused turn's
+        # copy/pickle rebuild via __new__: without the reason (and ownership), publishing a refused turn's
         # message.complete (deepcopy of the payload) raises and the viewer hangs.
-        return (str(self), self.reason), {}
+        return (str(self), self.reason), {"ownership": self.ownership}
 
 
 def format_refusal_stderr(message: str) -> str:
@@ -277,6 +291,8 @@ def _read_entries(path: Path, *, strict: bool = False) -> list[dict[str, Any]]:
             (lambda: not _optional_isinstance(entry.get("track_liveness"), bool), "an invalid liveness marker"),
             (lambda: not _optional_isinstance(entry.get("metadata"), dict), "invalid metadata"),
             (lambda: not _valid_process_start(entry.get("process_start_time")), "an invalid process start time"),
+            (lambda: not _valid_generation(entry.get("generation")), "an invalid fencing generation"),
+            (lambda: not _optional_isinstance(entry.get("busy_turn"), str), "an invalid turn marker"),
         ):
             if bad():
                 raise invalid(f"contains {what}")
@@ -352,8 +368,95 @@ def _valid_process_start(v: Any) -> bool:
     return parsed is not None and math.isfinite(parsed)
 
 
-def _write_entries(path: Path, entries: list[dict[str, Any]]) -> None:
-    atomic_json_write(path, {"entries": entries}, indent=None, sort_keys=True)
+def _finite_generation(v: Any) -> int:
+    """``v`` as a finite positive generation, else 0. Bools, floats, strings, NaN and
+    out-of-range values are all "not a generation" — a fencing comparison against
+    anything but a plain positive int is not a comparison."""
+    if not isinstance(v, int) or isinstance(v, bool):
+        return 0
+    return v if 0 < v <= _MAX_GENERATION else 0
+
+
+# A generation is a hand-counted human action (one per explicit handoff), so any value
+# near this bound is corruption, not history. Bounding it keeps the CAS total-ordered
+# and the JSON small.
+_MAX_GENERATION = 1 << 40
+
+
+def _valid_generation(v: Any) -> bool:
+    """Absent (written by a Hermes without fencing) or a finite positive int."""
+    return v is None or _finite_generation(v) > 0
+
+
+def _entry_generation(entry: dict[str, Any]) -> int:
+    """The entry's fencing generation, or 0 when its writer does not speak the protocol."""
+    return _finite_generation(entry.get("generation"))
+
+
+# ``session_id -> [generation, updated_at]`` high-water marks, persisted beside the
+# entries. Written only when a session is HANDED OFF, so the map holds one small record
+# per chat a user has ever moved between devices — never one per chat.
+#
+# Its single job is monotonicity: a lease acquired after a handoff must not be issued a
+# generation the fence already passed, so the CAS precondition stays totally ordered.
+# The record must outlive every live owner and every unrelated handoff: transfer may
+# legitimately recreate an absent entry after runtime-id rotation, and this permanent
+# high-water mark is what distinguishes that recovery from a superseded lease trying to
+# resurrect itself.
+_FENCE_KEY = "fences"
+
+
+def _read_fences(path: Path) -> dict[str, list]:
+    """The high-water map, tolerantly: anything unparseable reads as "no history"."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):  # missing/unreadable file or corrupt JSON: no history
+        return {}
+    fences = data.get(_FENCE_KEY) if isinstance(data, dict) else None
+    if not isinstance(fences, dict):
+        return {}
+    return {
+        str(key): [_finite_generation(value[0]), _optional_float(value[1]) or 0.0]
+        for key, value in fences.items()
+        if isinstance(value, (list, tuple)) and len(value) == 2 and _finite_generation(value[0]) > 0
+    }
+
+
+def _fenced_generation(fences: dict[str, list], session_id: str) -> int:
+    record = fences.get(str(session_id))
+    return _finite_generation(record[0]) if isinstance(record, (list, tuple)) and record else 0
+
+
+def _bump_fence(fences: dict[str, list], session_id: str, generation: int) -> dict[str, list]:
+    """Record ``generation`` as the high-water mark for ``session_id`` (monotonic)."""
+    key = str(session_id)
+    updated = dict(fences)
+    updated[key] = [max(generation, _fenced_generation(fences, key)), time.time()]
+    return updated
+
+
+def _next_generation(path: Path, session_id: str) -> int:
+    """The generation a FRESH lease on ``session_id`` must take: past every fence issued."""
+    return _fenced_generation(_read_fences(path), session_id) + 1
+
+
+def _entry_busy(entry: dict[str, Any]) -> bool:
+    """Whether the owner has a turn in flight. Set by the owner under THIS file's lock, so an
+    idle reading is a fact about the owner's last mutation boundary, not a guess from a clock."""
+    return bool(str(entry.get("busy_turn") or "").strip())
+
+
+def _write_entries(
+    path: Path, entries: list[dict[str, Any]], fences: Optional[dict[str, list]] = None
+) -> None:
+    """Persist the live entries. ``fences`` defaults to whatever is already on disk, so the
+    high-water marks survive every writer that has no reason to know about them."""
+    resolved = _read_fences(path) if fences is None else fences
+    payload: dict[str, Any] = {"entries": entries}
+    if resolved:
+        payload[_FENCE_KEY] = resolved
+    atomic_json_write(path, payload, indent=None, sort_keys=True)
 
 
 def _process_start_time(pid: int) -> Optional[float]:
@@ -459,6 +562,14 @@ class ActiveSessionLease:
     surface: str
     enabled: bool = True
     released: bool = False
+    # Fencing generation of the registry slot this lease was written with. A handoff
+    # advances it, which is what makes the previous owner's still-referenced lease
+    # object stop validating (it cannot be reached and deleted in another process).
+    # 0 = pre-fencing lease / inert token: validation then keys on lease_id alone.
+    generation: int = 0
+    # Writer identity (``live_session_id``) as recorded in the registry, so a
+    # re-assertion after a transient prune restores the same identity.
+    metadata: Optional[dict[str, Any]] = None
     # Pinned at acquisition: a lease taken under the root HERMES_HOME must release
     # against the same registry even inside a profile-home override, or phantom
     # leases fill the session cap.
@@ -519,6 +630,7 @@ def _read_live_entries(
 def _lease_entry(
     *, lease_id: str, session_id: str, surface: str,
     metadata: Optional[dict[str, Any]] = None, track_liveness: bool = False,
+    generation: int = 1,
 ) -> dict[str, Any]:
     now = time.time()
     entry: dict[str, Any] = {
@@ -529,6 +641,7 @@ def _lease_entry(
         "process_start_time": _own_start_time(),
         "started_at": now,
         "updated_at": now,
+        "generation": max(1, int(generation)),
     }
     if track_liveness:
         entry["track_liveness"] = True
@@ -562,16 +675,20 @@ def try_acquire_active_session(
             lease_id=lease_id, session_id=key, surface=str(surface), enabled=False
         ), None
 
-    entry = _lease_entry(
-        lease_id=lease_id, session_id=key, surface=str(surface), metadata=metadata,
-        track_liveness=track_liveness,
-    )
     state_path, lock_path = _lease_paths(registry_home=registry_home)
     lease = ActiveSessionLease(
         lease_id=lease_id, session_id=key, surface=str(surface), state_path=state_path,
         lock_path=lock_path, track_liveness=track_liveness,
+        metadata=_clean_metadata(metadata) if metadata else None,
     )
     with _FileLock(lock_path):
+        # Past every generation this session has ever been fenced at, so a lease minted
+        # after a handoff can never be confused with the superseded one.
+        entry = _lease_entry(
+            lease_id=lease_id, session_id=key, surface=str(surface), metadata=metadata,
+            track_liveness=track_liveness, generation=_next_generation(state_path, key),
+        )
+        lease.generation = _entry_generation(entry)
         # A capacity cap could degrade open; exclusivity cannot: "could not
         # prove ownership" must never become "no owner exists".
         loaded = _read_live_entries(
@@ -592,10 +709,12 @@ def try_acquire_active_session(
         if pruned:
             logger.info("Pruned %d stale active session lease(s)", pruned)
 
-        def refuse(message: str, reason: str, log: str, *args) -> tuple[None, ActiveSessionRefusal]:
+        def refuse(
+            message: str, reason: str, log: str, *args, ownership: Optional[dict[str, Any]] = None,
+        ) -> tuple[None, ActiveSessionRefusal]:
             _write_entries(state_path, entries)  # persist the prune even when refusing
             logger.info(log, *args)
-            return None, ActiveSessionRefusal(message, reason)
+            return None, ActiveSessionRefusal(message, reason, ownership)
 
         # Correctness first, under the same lock that just pruned dead owners.
         # An empty key is exempt: treating "" as an identity would make every
@@ -609,13 +728,21 @@ def try_acquire_active_session(
                 # its own session permanently (pruning only removes entries
                 # whose PROCESS is dead). Re-entrancy, not concurrency.
                 if _is_same_writer(existing, metadata):
+                    # Same writer, same slot: keep the fencing generation (and any turn
+                    # marker) it already had — re-entrancy is not a fence event, and
+                    # bumping here would invalidate a claimant's fresh observation.
+                    entry["generation"] = _entry_generation(existing) or entry["generation"]
+                    if _entry_busy(existing):
+                        entry["busy_turn"] = existing["busy_turn"]
                     entries[index] = entry
+                    lease.generation = _entry_generation(entry)
                     _write_entries(state_path, entries)
                     return lease, None
                 return refuse(
                     session_already_owned_message(key, existing), SESSION_NOT_OWNED,
                     "Refused active session %s: already held by pid=%s surface=%s",
                     key, existing.get("pid"), existing.get("surface"),
+                    ownership=_owner_from_entry(existing).as_wire(),
                 )
 
         # Capacity second, and only when an operator asked for one.
@@ -630,6 +757,298 @@ def try_acquire_active_session(
         _write_entries(state_path, entries)
 
     return lease, None
+
+
+# ── explicit handoff: fencing generation + compare-and-swap ────────────────────
+#
+# Exclusivity is a fence, and a fence needs a gate. The gate is a USER-INVOKED
+# handoff, never an implicit takeover on resume/open, and it rests on three
+# properties this section implements:
+#
+#   1. Exactness. The claimant names the (lease_id, generation) pair it observed.
+#      Anything else -- a replay, a cached refusal, a second device that lost the
+#      race -- fails the compare-and-swap and changes nothing.
+#   2. Quiescence. The owner records its own turn boundaries in its registry entry
+#      under this file's lock, so another PROCESS can prove the owner is idle
+#      without interrupting it or trusting a heartbeat. A busy owner is refused.
+#   3. Fencing. A committed handoff advances the generation. The old runtime's
+#      lease object still exists in its own process (nothing can reach in and
+#      delete it), so it is REVALIDATION at every mutation boundary that stops it.
+#
+# Every refusal path leaves the registry exactly as found: "I cannot prove this is
+# safe" must never be the thing that rewrites ownership.
+
+
+@dataclass(frozen=True)
+class ActiveSessionOwner:
+    """The live owner of one stored session — a claimant's handoff precondition."""
+
+    session_id: str
+    lease_id: str
+    generation: int
+    surface: str
+    busy: bool
+    started_at: Optional[float] = None
+
+    @property
+    def handoff_supported(self) -> bool:
+        """False for an owner written by a Hermes without fencing: there is no generation
+        to advance, so its lease could not be fenced and a handoff must not be offered."""
+        return self.generation > 0
+
+    def as_wire(self) -> dict[str, Any]:
+        """The closed payload the gateway forwards to a claimant. Deliberately excludes
+        pid, process start time, profile home and lease metadata: a claimant needs the
+        CAS precondition and enough context to ask the user, nothing about the host."""
+        age = None if self.started_at is None else max(0.0, round(time.time() - self.started_at, 3))
+        return {
+            "session_id": self.session_id,
+            "lease_id": self.lease_id,
+            "generation": self.generation,
+            "surface": self.surface,
+            "busy": self.busy,
+            "age_seconds": age,
+            "handoff_supported": self.handoff_supported,
+        }
+
+
+def _owner_from_entry(entry: dict[str, Any]) -> ActiveSessionOwner:
+    return ActiveSessionOwner(
+        session_id=str(entry.get("session_id") or ""),
+        lease_id=str(entry.get("lease_id") or ""),
+        generation=_entry_generation(entry),
+        surface=str(entry.get("surface") or "unknown"),
+        busy=_entry_busy(entry),
+        started_at=_optional_float(entry.get("started_at")),
+    )
+
+
+def _coordination_refusal(state_path: Path, exc: Exception) -> ActiveSessionRefusal:
+    return ActiveSessionRefusal(
+        f"Hermes could not read the active-session registry at {state_path}, so it cannot "
+        f"prove who owns this session ({exc}). Fix or remove that file and try again.",
+        SESSION_COORDINATION_UNAVAILABLE,
+    )
+
+
+def _live_entries_for(state_path: Path, session_id: str) -> list[dict[str, Any]]:
+    """Strictly-parsed live entries, with ``session_id``'s owner proven live or nothing."""
+    return _prune_dead(
+        _read_entries(state_path, strict=True), strict=True, target_session_id=session_id,
+    )
+
+
+def observe_active_session_owner(
+    session_id: str, *, registry_home: str | Path | None = None,
+) -> Optional[ActiveSessionOwner]:
+    """The live owner of ``session_id``, or None when nobody owns it.
+
+    Raises ``ActiveSessionRegistryError`` when the registry cannot be parsed or the
+    owner's liveness cannot be proven — an unprovable registry is never "unowned".
+    """
+    key = str(session_id or "")
+    if not key:
+        return None
+    state_path, lock_path = _lease_paths(registry_home=registry_home)
+    with _FileLock(lock_path):
+        for entry in _live_entries_for(state_path, key):
+            if str(entry.get("session_id") or "") == key:
+                return _owner_from_entry(entry)
+    return None
+
+
+def _inert(lease: Any) -> bool:
+    """True for leases that never represented a registry slot: the disabled no-op lease of an
+    unsaved draft, the inert borrowed token of a compute-host child, an already-released lease.
+    Their legacy contract is unchanged — validation is a no-op, not a refusal."""
+    return (
+        lease is None
+        or not getattr(lease, "enabled", False)
+        or getattr(lease, "released", False)
+        or not str(getattr(lease, "session_id", "") or "")
+    )
+
+
+def _owned_slot_locked(
+    lease: ActiveSessionLease, state_path: Path,
+) -> tuple[Optional[tuple[list[dict[str, Any]], int]], Optional[ActiveSessionRefusal]]:
+    """Under the registry lock: ``((entries, index), None)`` when ``lease`` is still the exact
+    owner of its session, else ``(None, refusal)``. Caller holds the lock.
+
+    A slot with NO entry is refused, never re-asserted. A lease object is evidence of a past
+    claim only, and an absent entry cannot distinguish "my entry was transiently pruned" from
+    "the user moved this chat away and the claimant has since closed it" — and writing the
+    stale holder back would resurrect a writer whose transcript is a generation out of date.
+    Refusal is not a lockout: the refused runtime drops the lease and its next turn takes the
+    ordinary acquisition path, which mints a FRESH lease under this lock when nobody owns the
+    chat, and is refused again when somebody does.
+    """
+    key = str(lease.session_id)
+    try:
+        entries = _live_entries_for(state_path, key)
+    except ActiveSessionRegistryError as exc:
+        return None, _coordination_refusal(state_path, exc)
+    for index, entry in enumerate(entries):
+        if str(entry.get("session_id") or "") != key:
+            continue
+        lease_generation = _finite_generation(getattr(lease, "generation", 0))
+        if str(entry.get("lease_id") or "") != str(lease.lease_id) or (
+            lease_generation and _entry_generation(entry) != lease_generation
+        ):
+            owner = _owner_from_entry(entry)
+            return None, ActiveSessionRefusal(
+                session_already_owned_message(key, entry), SESSION_NOT_OWNED, owner.as_wire())
+        return (entries, index), None
+    logger.info(
+        "Refusing active session %s: this runtime's lease %s (generation %s) has no registry entry",
+        key, lease.lease_id, getattr(lease, "generation", 0))
+    return None, ActiveSessionRefusal(
+        "This chat is no longer open on this device. Reopen it and send again.", SESSION_NOT_OWNED)
+
+
+def validate_active_session_lease(lease: Any) -> Optional[ActiveSessionRefusal]:
+    """Re-prove that ``lease`` is still the registry's exact owner; None when it is.
+
+    THE fence. Called at every mutation boundary, because an attached lease object is only
+    evidence of a PAST claim: after a handoff it names a generation the registry has moved
+    past, and trusting it is how two writers end up interleaving one transcript.
+    """
+    if _inert(lease):
+        return None
+    state_path, lock_path = _lease_paths(lease)
+    with _FileLock(lock_path):
+        return _owned_slot_locked(lease, state_path)[1]
+
+
+def begin_active_session_turn(lease: Any, *, turn_token: str) -> Optional[ActiveSessionRefusal]:
+    """Fence-check ``lease`` and mark its slot busy in ONE atomic step; None when admitted.
+
+    Atomicity is the point: a claimant's quiescence probe and this reservation contend for
+    the same file lock, so a turn either reserves before the handoff commits (and the
+    handoff is refused busy) or after it (and this is refused SESSION_NOT_OWNED). There is
+    no ordering in which both proceed. Idempotent for the same ``turn_token``, so a turn may
+    re-assert it at successive boundaries without double-counting.
+    """
+    if _inert(lease):
+        return None
+    token = str(turn_token or "").strip() or "turn"
+    state_path, lock_path = _lease_paths(lease)
+    with _FileLock(lock_path):
+        found, refusal = _owned_slot_locked(lease, state_path)
+        if refusal is not None:
+            return refusal
+        entries, index = found
+        existing = str(entries[index].get("busy_turn") or "").strip()
+        if existing and existing != token:
+            return ActiveSessionRefusal(
+                "This chat is still finishing another turn. Try again when it settles.",
+                SESSION_HANDOFF_BUSY,
+                _owner_from_entry(entries[index]).as_wire(),
+            )
+        entries[index]["busy_turn"] = token
+        entries[index]["updated_at"] = time.time()
+        _write_entries(state_path, entries)
+    return None
+
+
+def end_active_session_turn(lease: Any, *, turn_token: str) -> None:
+    """Clear ``lease``'s turn marker. Best-effort and strictly scoped to (lease_id, token):
+    a fenced runtime unwinding its interrupted turn must not report the NEW owner's live
+    turn as idle. Never raises — a finished turn cannot be failed by bookkeeping."""
+    if _inert(lease):
+        return
+    token = str(turn_token or "").strip() or "turn"
+    key = str(lease.session_id)
+    state_path, lock_path = _lease_paths(lease)
+    try:
+        with _FileLock(lock_path):
+            # strict: a registry we cannot parse keeps its bytes AND its busy marker
+            # (fail-closed), rather than being rewritten from a lossy read.
+            entries = _read_entries(state_path, strict=True)
+            changed = False
+            for entry in entries:
+                if (str(entry.get("session_id") or "") == key
+                        and str(entry.get("lease_id") or "") == str(lease.lease_id)
+                        and str(entry.get("busy_turn") or "") == token):
+                    entry.pop("busy_turn", None)
+                    entry["updated_at"] = time.time()
+                    changed = True
+            if changed:
+                _write_entries(state_path, entries)
+    except Exception:
+        logger.debug("failed to clear active-session turn marker for %s", key, exc_info=True)
+
+
+def handoff_active_session(
+    *, session_id: str, surface: str, expected_lease_id: str, expected_generation: int,
+    metadata: Optional[dict[str, Any]] = None, registry_home: str | Path | None = None,
+    track_liveness: bool = False,
+) -> tuple[Optional[ActiveSessionLease], Optional[ActiveSessionRefusal]]:
+    """Move ``session_id``'s write lease to THIS process: ``(lease, None)`` or ``(None, refusal)``.
+
+    An exact compare-and-swap against the observation the claimant acted on. Refuses
+    ``SESSION_HANDOFF_STALE`` when the pair no longer describes the live owner (replay, a
+    racing second claimant, an owner that rotated), ``SESSION_HANDOFF_BUSY`` when the owner
+    has a turn in flight, ``SESSION_COORDINATION_UNAVAILABLE`` when ownership cannot be
+    proven. Every refusal leaves the registry byte-for-byte as found.
+
+    Capacity is deliberately not consulted: a handoff MOVES a slot the cap already counted.
+    """
+    key = str(session_id or "")
+    expected_lease = str(expected_lease_id or "")
+    # A bool, a float, a NaN or an out-of-range value is not a generation: refuse rather
+    # than coerce, so the compare-and-swap is always an exact integer comparison.
+    expected_gen = _finite_generation(expected_generation)
+    state_path, lock_path = _lease_paths(registry_home=registry_home)
+
+    def stale(log: str, *args) -> tuple[None, ActiveSessionRefusal]:
+        logger.info("Refused session handoff for %s: " + log, key, *args)
+        return None, ActiveSessionRefusal(
+            "This chat moved to another window since Hermes checked. Reopen it and try again.",
+            SESSION_HANDOFF_STALE,
+        )
+
+    if not key or not expected_lease or expected_gen <= 0:
+        return stale("incomplete observation (lease=%r generation=%r)", expected_lease, expected_gen)
+
+    with _FileLock(lock_path):
+        try:
+            entries = _live_entries_for(state_path, key)
+        except ActiveSessionRegistryError as exc:
+            return None, _coordination_refusal(state_path, exc)
+        owner_index = next(
+            (i for i, e in enumerate(entries) if str(e.get("session_id") or "") == key), None)
+        if owner_index is None:
+            return stale("no live owner to hand off")
+        existing = entries[owner_index]
+        if str(existing.get("lease_id") or "") != expected_lease:
+            return stale("lease id changed since it was observed")
+        if _entry_generation(existing) != expected_gen:
+            return stale("generation moved to %s since it was observed", _entry_generation(existing))
+        if _entry_busy(existing):
+            logger.info("Refused session handoff for %s: owner has a turn in flight", key)
+            return None, ActiveSessionRefusal(
+                "That chat is mid-reply on the other device. Wait for it to finish, then move it here.",
+                SESSION_HANDOFF_BUSY, _owner_from_entry(existing).as_wire(),
+            )
+        lease_id = uuid.uuid4().hex
+        generation = expected_gen + 1
+        entries[owner_index] = _lease_entry(
+            lease_id=lease_id, session_id=key, surface=str(surface), metadata=metadata,
+            track_liveness=track_liveness, generation=generation,
+        )
+        # The high-water mark outlives both leases AND the entry: after the claimant
+        # closes the chat, a fresh acquisition still starts past this fence.
+        _write_entries(
+            state_path, entries, _bump_fence(_read_fences(state_path), key, generation))
+    logger.info(
+        "Session %s handed off to surface=%s pid=%s generation=%d (fencing lease %s)",
+        key, surface, os.getpid(), expected_gen + 1, expected_lease)
+    return ActiveSessionLease(
+        lease_id=lease_id, session_id=key, surface=str(surface), state_path=state_path,
+        lock_path=lock_path, track_liveness=track_liveness, generation=generation,
+        metadata=_clean_metadata(metadata) if metadata else None,
+    ), None
 
 
 def release_active_session(lease: ActiveSessionLease) -> None:
@@ -678,16 +1097,31 @@ def transfer_active_session(
         if loaded is None:
             return False
         entries = loaded[1]
+        lease_generation = _finite_generation(getattr(lease, "generation", 0))
         own = next((e for e in entries if str(e.get("lease_id") or "") == lease.lease_id), None)
         if own is not None:
+            # Same lease id, different generation: the registry has moved past the
+            # observation this lease object carries. Retargeting it would rename a
+            # slot on behalf of a writer that no longer holds it.
+            if lease_generation and _entry_generation(own) != lease_generation:
+                return False
             own["session_id"] = new_session_id
             own["updated_at"] = time.time()
             if metadata:
                 own["metadata"] = _clean_metadata(metadata)
-        elif lease.track_liveness:
+        elif lease.track_liveness and _fenced_generation(
+            _read_fences(state_path), lease.session_id
+        ) <= lease_generation:
+            # The upsert exists for an entry this process lost transiently (a pruned or
+            # deleted registry), NOT for a superseded one: a fence above this lease's
+            # generation is the durable record that the user moved the chat away, and it
+            # outlives the claimant's entry. Recreating the slot from here would resurrect
+            # a writer a generation behind the transcript. Refusal is not a lockout -- the
+            # next turn holds no lease and takes the ordinary acquisition path, which mints
+            # a fresh lease past the fence.
             entries.append(_lease_entry(
                 lease_id=lease.lease_id, session_id=new_session_id, surface=lease.surface,
-                metadata=metadata, track_liveness=True,
+                metadata=metadata, track_liveness=True, generation=max(1, lease_generation),
             ))
         else:
             return False

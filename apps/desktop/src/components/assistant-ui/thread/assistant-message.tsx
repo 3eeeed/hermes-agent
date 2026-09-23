@@ -52,6 +52,7 @@ import type { Translations } from '@/i18n/types'
 import {
   ERROR_SETUP_GUIDE_URLS,
   type ErrorActionId,
+  type ErrorCardActions,
   errorCardActions,
   errorCardSeverity,
   errorCardShowsDiagnostics,
@@ -68,6 +69,7 @@ import { errorCardText, errorProviderName } from '@/lib/error-surface-copy'
 import { openExternalLink } from '@/lib/external-link'
 import { triggerHaptic } from '@/lib/haptics'
 import {
+  ArrowRightLeft,
   AudioLines,
   GitForkIcon,
   Loader2Icon,
@@ -86,12 +88,13 @@ import { playSpeechText, stopVoicePlayback } from '@/lib/voice-playback'
 import { $billingBlock, requestBillingSettings, runBillingRecovery } from '@/store/billing-block'
 import { DESKTOP_BUTTON_ACTIONS, recordAction } from '@/store/desktop-metrics'
 import { openFreeTierSignIn } from '@/store/free-tier-sign-in'
-import { notifyError } from '@/store/notifications'
+import { dismissNotification, notifyError } from '@/store/notifications'
 import { startManualProviderOAuth } from '@/store/onboarding'
 import { $activeGatewayProfile, normalizeProfileKey, requestFreshSession } from '@/store/profile'
 import { sessionApprovalRequest } from '@/store/prompts'
 import { requestSendDiagnostics } from '@/store/send-diagnostics'
 import { $connection, $currentModel, setModelPickerOpen } from '@/store/session'
+import { $pendingSessionMoves, canMoveSessionHere, moveSessionHere } from '@/store/session-move'
 import { sessionTileDelegate } from '@/store/session-states'
 import { notifyThreadEditOpen } from '@/store/thread-scroll'
 import { $voicePlayback } from '@/store/voice-playback'
@@ -725,6 +728,69 @@ const CompressConversationAction: FC<{ className: string; label: string }> = ({ 
   )
 }
 
+// "Move here" for a chat another device owns. The fence that refused the send is
+// correct — exactly one Hermes may write a chat — so the fix is not a retry but
+// choosing which device writes. One click claims the chat (an exact
+// compare-and-swap against the owner the refusal named) and finishes the send
+// that was refused, including its attachments, exactly once.
+//
+// Offered only when there IS a refused send held for this chat (useMoveHereAvailable):
+// the store is what preserves the draft (the composer cleared it before dispatching),
+// so without it there is nothing to finish and the button could only move a chat silently.
+const MoveSessionHereAction: FC<{ className: string; copy: Translations['assistant']['thread'] }> = ({
+  className,
+  copy
+}) => {
+  const storedId = useStore(useSessionView().$storedId)
+  const [moving, setMoving] = useState(false)
+
+  const move = useCallback(async () => {
+    if (!storedId) {
+      return
+    }
+
+    triggerHaptic('submit')
+    setMoving(true)
+
+    try {
+      const result = await moveSessionHere(storedId)
+      const notificationId = `session-move:${storedId}`
+
+      if (!result.ok) {
+        // The draft and its attachments are still held, so the user can wait
+        // for the other device and click again — never a silent new chat.
+        notifyError(
+          new Error(result.message || result.reason || 'move failed'),
+          result.reason === 'SESSION_HANDOFF_BUSY' ? copy.errorMoveSessionBusy : copy.errorMoveSessionFailed,
+          { id: notificationId }
+        )
+      } else {
+        dismissNotification(notificationId)
+      }
+    } finally {
+      setMoving(false)
+    }
+  }, [copy.errorMoveSessionBusy, copy.errorMoveSessionFailed, storedId])
+
+  return (
+    <button className={className} disabled={moving} onClick={() => void move()} type="button">
+      {moving ? <Loader2Icon className="size-3 animate-spin" /> : <ArrowRightLeft className="size-3" />}
+      {copy.errorMoveSessionHere}
+    </button>
+  )
+}
+
+// A chat another device owns refuses every send, so several may be waiting. Move here is
+// offered only when one of them can actually be moved — an owner block that names another
+// chat, or predates fencing, can only produce a failed claim. `pending` is read so the card
+// re-renders when the queue changes.
+function useMoveHereAvailable(): boolean {
+  const storedId = useStore(useSessionView().$storedId)
+  const pending = useStore($pendingSessionMoves)
+
+  return Boolean(pending) && canMoveSessionHere(storedId)
+}
+
 // usage_window: "Switch to Model A" — the plan's recommended model that
 // still works past the limit (agent/plan_limits.py picked it). Switches THIS
 // session (session.info repaints the composer), then re-runs the refused turn
@@ -1060,7 +1126,12 @@ const ErrorDetailsBlock: FC<{ errorText: string; hidden: boolean; id: string; su
 
 const ErrorCardActionRow: FC<{ surface?: ErrorSurface }> = ({ surface }) => {
   const inRouter = useInRouterContext()
-  const { primary, secondary } = errorCardActions(surface)
+  const moveHereAvailable = useMoveHereAvailable()
+  const actions = errorCardActions(surface)
+
+  // Nothing preserved to finish here: the move has nothing to do, so starting fresh is the one fix.
+  const { primary, secondary }: ErrorCardActions =
+    actions.primary === 'move_here' && !moveHereAvailable ? { primary: 'start_new_session' } : actions
 
   return (
     <div className="aui-error-card-actions">
@@ -1181,6 +1252,7 @@ const ERROR_ACTION_RENDERERS: Record<ErrorActionId, (ctx: ErrorActionContext) =>
   compress: ({ className, copy }) => (
     <CompressConversationAction className={className} label={copy.errorCompressConversation} />
   ),
+  move_here: ({ className, copy }) => <MoveSessionHereAction className={className} copy={copy} />,
   start_new_session: ({ className, copy, link }) =>
     textButton(className, requestFreshSession, link ? copy.errorStartNewChatLink : copy.errorStartNewSession),
   edit_message: ({ className, copy }) => <EditPreviousMessageAction className={className} label={copy.editMessage} />,

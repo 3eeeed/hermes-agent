@@ -138,6 +138,24 @@ def _run_turn(frame: dict, timeout: float = 30.0) -> tuple[list[dict], dict | No
 # ── Fix 1: the child borrows instead of re-claiming ─────────────────────────
 
 
+def test_isolated_child_receives_the_parent_persisted_user_row(isolated_env, monkeypatch):
+    captured: list[dict] = []
+
+    def run_with_adopted_row(_rid, _sid, session, _text, **_kwargs):
+        captured.append(dict(session.get("_submit_user_row") or {}))
+        return True
+
+    monkeypatch.setattr(server, "_run_prompt_submit", run_with_adopted_row)
+    staged = {
+        "role": "user", "content": "hello", "_row_id": 77,
+        "_db_persisted": True, "timestamp": 1.0}
+
+    _frames_seen, end = _run_turn(_make_frame("s1-row", submit_user_row=staged))
+
+    assert end is not None
+    assert captured == [staged]
+
+
 def test_isolated_turn_runs_against_parent_leased_session(isolated_env):
     """THE #101416 repro, fixed: parent holds the lease, child runs the turn end-to-end and the
     registry still holds exactly the parent's entry."""

@@ -233,10 +233,11 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
       sessionId: string,
       attachments: ComposerAttachment[],
       options: { updateComposerAttachments?: boolean } = {}
-    ): Promise<{ attachments: ComposerAttachment[]; sessionId: string }> => {
+    ): Promise<{ attachments: ComposerAttachment[]; sessionId: string; stagedImagePaths: string[] }> => {
       const remote = isSessionRemote(storedIdRef.current ?? sessionId)
       let liveSessionId = sessionId
       const synced: ComposerAttachment[] = []
+      const stagedImagePaths: string[] = []
 
       // A tile owns its own runtime binding, so a recovery here rebinds the
       // tile's ref rather than the foreground session's.
@@ -282,6 +283,9 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
           }
 
           synced.push(next)
+          if (attachment.kind === 'image' && next.path) {
+            stagedImagePaths.push(next.path)
+          }
 
           continue
         }
@@ -289,7 +293,7 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
         synced.push(attachment)
       }
 
-      return { attachments: synced, sessionId: liveSessionId }
+      return { attachments: synced, sessionId: liveSessionId, stagedImagePaths }
     },
     [bindRecoveredRuntime, readState, requestSessionGateway, scope.attachments]
   )

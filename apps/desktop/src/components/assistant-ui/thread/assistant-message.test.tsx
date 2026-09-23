@@ -13,7 +13,9 @@ import { en } from '@/i18n/en'
 import type { ErrorCardCopy } from '@/i18n/types'
 import { $touchPointer } from '@/lib/touch-interaction'
 import { $displayTimestamps } from '@/store/display-timestamps'
-import { $activeSessionId } from '@/store/session'
+import { $notifications, clearNotifications } from '@/store/notifications'
+import { $activeSessionId, $selectedStoredSessionId } from '@/store/session'
+import { $pendingSessionMoves } from '@/store/session-move'
 import { type SessionTileDelegate, setSessionTileDelegate } from '@/store/session-states'
 
 import { stubThreadEnvironment } from '../test-utils'
@@ -40,6 +42,7 @@ vi.mock('@/app/chat/composer/focus', async importOriginal => ({
   requestComposerSubmit: (text: string, options?: unknown) => requestComposerSubmit(text, options),
   requestModelMenuToggle: () => requestModelMenuToggle()
 }))
+const moveSessionHere = vi.hoisted(() => vi.fn(async (_storedSessionId: string) => ({ ok: true })))
 
 vi.mock('@/store/profile', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -49,6 +52,11 @@ vi.mock('@/store/profile', async importOriginal => ({
 vi.mock('@/store/onboarding', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
   startManualProviderOAuth: (...args: unknown[]) => startManualProviderOAuth(...args)
+}))
+
+vi.mock('@/store/session-move', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  moveSessionHere: (storedSessionId: string) => moveSessionHere(storedSessionId)
 }))
 
 // Timeline timestamps render only when `display.timestamps` is enabled.
@@ -72,6 +80,10 @@ afterEach(() => {
   $displayTimestamps.set(true)
   $touchPointer.set(false)
   vi.unstubAllGlobals()
+  moveSessionHere.mockClear()
+  clearNotifications()
+  $pendingSessionMoves.set({})
+  $selectedStoredSessionId.set(null)
 })
 
 function userMessage(): ThreadMessage {
@@ -115,7 +127,7 @@ function assistantMessage(): ThreadMessage {
   } as unknown as ThreadMessage
 }
 
-function ownershipRefusalMessage(): ThreadMessage {
+function ownershipRefusalMessage(ownership?: Record<string, unknown>): ThreadMessage {
   return {
     id: 'assistant-error-1',
     role: 'assistant',
@@ -134,7 +146,14 @@ function ownershipRefusalMessage(): ThreadMessage {
       unstable_data: [],
       steps: [],
       // What submit.ts stamps on a 4090 / SESSION_NOT_OWNED refusal.
-      custom: { errorSurface: { layer: 'gateway', code: 'SESSION_NOT_OWNED', retryable: false } }
+      custom: {
+        errorSurface: {
+          layer: 'gateway',
+          code: 'SESSION_NOT_OWNED',
+          retryable: false,
+          ...(ownership ? { ownership } : {})
+        }
+      }
     }
   } as unknown as ThreadMessage
 }
@@ -377,6 +396,93 @@ describe('ownership refusal recovery (#106217)', () => {
     const details = raw.closest<HTMLElement>('[data-slot="aui_error-details"]')
     expect(details).not.toBeNull()
     expect(details!.hidden).toBe(true)
+  })
+})
+
+describe('moving a chat here from the error card', () => {
+  // The refusal is not a dead end: exactly one device may write a chat, and the
+  // user is allowed to say which one. The card is where they say it.
+  const OWNERSHIP = {
+    age_seconds: 3540,
+    busy: false,
+    generation: 4,
+    handoff_supported: true,
+    lease_id: 'lease-macbook',
+    session_id: 'stored-1',
+    surface: 'desktop'
+  }
+
+  const preserveRefusedSend = () => {
+    $selectedStoredSessionId.set('stored-1')
+    $pendingSessionMoves.set({
+      'stored-1': [{
+        attemptId: 'attempt-1',
+        sendId: 'send-1',
+        attachments: [{ id: 'img-1', kind: 'image', label: 'shot.png', refText: '@file:shot.png' }],
+        displayText: undefined,
+        ownership: {
+          ageSeconds: 3540,
+          busy: false,
+          generation: 4,
+          handoffSupported: true,
+          leaseId: 'lease-macbook',
+          sessionId: 'stored-1',
+          surface: 'desktop'
+        },
+        runtimeId: 'imac-runtime',
+        storedSessionId: 'stored-1',
+        text: 'look at this'
+      }]
+    })
+  }
+
+  it('offers Move here beside Start new session, and no Retry', async () => {
+    preserveRefusedSend()
+    render(<Harness assistant={ownershipRefusalMessage(OWNERSHIP)} />)
+
+    expect(await screen.findByRole('button', { name: 'Move here' })).toBeTruthy()
+    // The fallback rides as the card's text link.
+    expect(screen.getByRole('button', { name: 'Start a new chat' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+  })
+
+  it('moves the chat for the session the card belongs to', async () => {
+    preserveRefusedSend()
+    render(<Harness assistant={ownershipRefusalMessage(OWNERSHIP)} />)
+
+    ;(await screen.findByRole('button', { name: 'Move here' })).click()
+
+    await waitFor(() => expect(moveSessionHere).toHaveBeenCalledWith('stored-1'))
+    // Moving is not starting over: the preserved send is finished in place.
+    expect(requestFreshSession).not.toHaveBeenCalled()
+  })
+
+  it('replaces a failed-move toast and clears it when the preserved resend later lands', async () => {
+    moveSessionHere
+      .mockResolvedValueOnce({ ok: false, reason: 'resend_failed' } as never)
+      .mockResolvedValueOnce({ ok: true })
+    preserveRefusedSend()
+    render(<Harness assistant={ownershipRefusalMessage(OWNERSHIP)} />)
+
+    const move = await screen.findByRole('button', { name: 'Move here' })
+
+    move.click()
+    await waitFor(() => expect($notifications.get()).toHaveLength(1))
+    expect($notifications.get()[0]?.id).toBe('session-move:stored-1')
+
+    move.click()
+    await waitFor(() => expect($notifications.get()).toHaveLength(0))
+  })
+
+  it('hides Move here when there is no preserved send to finish', async () => {
+    $selectedStoredSessionId.set('stored-1')
+    render(<Harness assistant={ownershipRefusalMessage(OWNERSHIP)} />)
+
+    // A refusal with nothing held (a background queue drain, a reconnect
+    // replay) has no draft to resend, so a "Move here" button would either do
+    // nothing or move a chat the user is not looking at.
+    await screen.findByRole('button', { name: 'Start new session' })
+    expect(screen.queryByRole('button', { name: 'Move here' })).toBeNull()
   })
 })
 

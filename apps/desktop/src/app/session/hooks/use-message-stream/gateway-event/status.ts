@@ -1,4 +1,3 @@
-import { isSessionNotOwnedError } from '@/app/session/hooks/use-prompt-actions/utils'
 import { runtimeTranslations, translateNow } from '@/i18n'
 import { textPart } from '@/lib/chat-messages'
 import { coerceGatewayText } from '@/lib/chat-runtime'
@@ -19,6 +18,7 @@ import { clearAllPrompts } from '@/store/prompts'
 import { setTurnStartedAt } from '@/store/session'
 import { clearActiveSessionTodos } from '@/store/todos'
 
+import { bindMoveToErrorCard, settleInFlightSendForError, statusErrorSurface } from './status-session-move'
 import type { GatewayEventContext } from './types'
 
 /** Lifecycle text that announces the session left its selected model for a fallback. */
@@ -321,17 +321,10 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
     // sentence: a blank install must reach onboarding, not a toast it cannot act on.
     const looksLikeProviderSetup = isProviderSetupErrorCode(payload?.code) || isProviderSetupErrorMessage(errorMessage)
 
-    // The gateway's `error` event carries no error_surface (prompt_turn.py
-    // emits it for pre-turn refusals). Recover the two codes it CAN mean from
-    // the text so the card and toast get the same plain copy + button gating
-    // as a classified turn: a live-owner refusal (SESSION_NOT_OWNED, #106217)
-    // is deterministic — Retry hits the same wall, only a new chat helps —
-    // and disk-full is a machine problem, not a provider one.
-    const surface: ErrorSurface | null = isSessionNotOwnedError(new Error(errorMessage))
-      ? { code: 'SESSION_NOT_OWNED', layer: 'gateway', retryable: false }
-      : isDiskFullErrorMessage(errorMessage)
-        ? { code: 'disk_full', layer: 'disk', retryable: false }
-        : null
+    // A stamped `error_surface` wins; otherwise recover SESSION_NOT_OWNED / disk_full from the
+    // text so the card gets classified copy + button gating (status-session-move.ts).
+    const surface = statusErrorSurface(payload?.error_surface, errorMessage, isDiskFullErrorMessage)
+    const armedMove = settleInFlightSendForError(sessionId, surface)
 
     // When a code was recovered, the glossed card sentence explains it better
     // than the raw refusal. When none was, the server's own text IS the plain
@@ -373,7 +366,8 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
 
     if (sessionId) {
       flushQueuedDeltas(sessionId)
-      failAssistantMessage(sessionId, errorMessage, occurredAt, surface)
+
+      bindMoveToErrorCard(armedMove, failAssistantMessage(sessionId, errorMessage, occurredAt, surface))
     }
 
     if (isActiveEvent) {

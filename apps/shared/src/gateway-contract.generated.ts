@@ -2777,6 +2777,8 @@ export interface PromptSubmitParams {
   confirm_empty_truncate?: boolean | null
   confirm_deep_truncate?: boolean | null
   rebind_survivor_row_ids?: number[] | null
+  client_send_id?: string | null
+  staged_attachment_paths?: string[] | null
 }
 /** ``status`` is absent only on the typed-stop-phrase reply (``voice_stopped``). After a truncation the survivor row ids let the client rebind its cached ``rowId``s (``None`` map entries: drop the cached id). ``turn_isolation`` marks a compute-host dispatch. */
 export interface PromptSubmitResult {
@@ -3430,6 +3432,20 @@ export interface SessionCloseParams {
 export interface SessionCloseResult {
   closed: boolean
   messages?: string[]
+}
+/** The claimant echoes the owner it OBSERVED (from a ``4090`` refusal's ``ownership`` block), so the transfer is an exact compare-and-swap: a replayed or superseded observation cannot move the lease. ``session_id`` is this device's live runtime id for the chat. */
+export interface SessionHandoffClaimParams {
+  session_id: string
+  profile?: string | null
+  expected_lease_id: string
+  expected_generation: number
+}
+/** ``claimed`` = the lease moved and the previous runtime is fenced; ``already_owner`` = this runtime held it (a double-clicked "Move here"). ``generation`` is the new fencing generation. */
+export interface SessionHandoffClaimResult {
+  status: string
+  session_id: string
+  stored_session_id: string
+  generation: number
 }
 export interface SessionBranchParams {
   session_id: string
@@ -5646,9 +5662,10 @@ export interface SetupReadyPayload {
   finished_at: number
   [key: string]: unknown
 }
-/** Every ``_emit("error", …)`` site sets exactly ``message``. */
+/** Session-level failure; ownership refusals also carry their typed move precondition. */
 export interface ErrorPayload {
   message: string
+  error_surface?: unknown | null
 }
 /** ``tui_gateway/model_switch.py`` capability-refresh notice. */
 export interface NoticePayload {
@@ -6441,6 +6458,8 @@ export interface RpcMethods {
   'session.foreign.list': { params: SessionForeignListParams; result: SessionForeignListResult }
   /** Preview a foreign session's tail before importing it. */
   'session.foreign.preview': { params: SessionForeignIdParams; result: SessionForeignPreviewResult }
+  /** Explicitly move a chat's write lease to this device (user-invoked; refuses a busy or changed owner with 4090 + a machine-readable reason). */
+  'session.handoff.claim': { params: SessionHandoffClaimParams; result: SessionHandoffClaimResult }
   /** The durable display transcript (ancestors included, row ids attached). */
   'session.history': { params: SessionHistoryParams; result: SessionHistoryResult }
   /** Stop the running turn (and streaming TTS); retires the crash-recovery marker. */
@@ -6769,6 +6788,7 @@ export const RPC_METHODS = [
   'session.foreign.import',
   'session.foreign.list',
   'session.foreign.preview',
+  'session.handoff.claim',
   'session.history',
   'session.interrupt',
   'session.list',

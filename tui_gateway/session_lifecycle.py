@@ -6,10 +6,15 @@ globals at install time (method_ctx.bind_module), so they reference server.py gl
 from __future__ import annotations
 
 import logging
+import uuid
+import contextvars
 
 import contextlib
 
 from .method_ctx import bind_module
+
+
+_turn_reservation_token_ctx = contextvars.ContextVar("hermes_turn_reservation_token", default="")
 
 
 @contextlib.contextmanager
@@ -122,11 +127,37 @@ def _ensure_active_session_slot(sid: str, session: dict) -> str | None:
     """Claim this session's cap slot on its first real turn; None when ok. session.create/resume deliberately
     do NOT claim: tile paints, reconnect-resumes and abandoned drafts would hold invisible slots (no DB row)
     that starve the messaging gateway sharing the cap. Anything holding a slot must be user-visible. An
-    inert borrowed token (see _install_borrowed_lease) also lands here: present = slot held upstream."""
+    inert borrowed token (see _install_borrowed_lease) also lands here: present = slot held upstream.
+
+    An ATTACHED lease is re-proven against the registry, not trusted. It is only evidence of a past
+    claim: after an explicit ``session.handoff.claim`` from another device the registry has moved to a
+    new fencing generation, and a runtime that kept writing on its stale lease object is the
+    double-writer this fence exists to prevent. Every mutation boundary funnels through here, so the
+    fence applies to prompt.submit, queued drains, auto-continue, notification and synthesized turns
+    alike (see ``_admit_prompt_turn``)."""
     if (canonical := _canonical_ledger_refusal(session)) is not None:
         return canonical
-    if session.get("active_session_lease") is not None:
-        return None
+    if (lease := session.get("active_session_lease")) is not None:
+        from hermes_cli.active_sessions import validate_active_session_lease
+        try:
+            fenced = validate_active_session_lease(lease)
+        except Exception as exc:
+            logger.warning("Failed to revalidate active session lease for %s: %s", sid, exc, exc_info=True)
+            return _SESSION_OWNERSHIP_UNAVAILABLE  # fail CLOSED: unproven ownership is not ownership
+        if fenced is None:
+            return None
+        # Fenced: drop the dead lease object so this runtime cannot keep presenting it as
+        # authority. The registry entry (if any) belongs to somebody else now and is keyed by
+        # THEIR lease id, so nothing this runtime releases can touch it — and the next turn
+        # takes the ordinary acquisition path below rather than reconstructing this one.
+        logger.info("Session %s lease was fenced: %s", session.get("session_key") or sid, fenced.reason)
+        session.pop("active_session_lease", None)
+        # Only a refusal that NAMES a live owner is a takeover: that runtime owns the durable
+        # row and its delegations now. An entry-less slot names nobody, so claiming a takeover
+        # there would hand the row's lifecycle to a backend that does not exist.
+        if getattr(fenced, "ownership", None):
+            session["_lease_taken_over"] = True
+        return fenced
     key = str(session.get("session_key") or "")
     lease, limit_message = _claim_active_session_slot(
         key, live_session_id=sid, surface=_session_source(session), profile_home=session.get("profile_home"))
@@ -212,6 +243,107 @@ def _canonical_ledger_refusal(session: dict):
     # (tui_gateway/owner_forward.py); an ``unknown`` admission is never forwarded past.
     refusal.ledger_status = row[0]
     return refusal
+
+
+def _session_turn_token(sid: str, session: dict) -> str:
+    """Current immutable turn occurrence, never the reusable runtime id."""
+    return str(session.get("_active_turn_reservation_token") or "")
+
+
+def _reserve_session_turn(sid: str, session: dict) -> str | None:
+    """Re-prove ownership AND publish "a turn is running" into the shared registry; None when admitted.
+
+    Call before any queue/history/attachment mutation. The publish is what lets a claimant on
+    another device PROVE this owner is idle before moving the chat: both sides contend for the
+    registry's file lock, so a turn either reserves before a handoff commits (and the handoff is
+    refused busy) or after it (and the turn is refused SESSION_NOT_OWNED). Sessions with no lease
+    yet are admitted — ``_ensure_active_session_slot`` is the claim; this is only the marker."""
+    lease = session.get("active_session_lease")
+    if lease is None:
+        return None
+    from hermes_cli.active_sessions import begin_active_session_turn
+    # Callers commonly already hold ``history_lock`` and legacy records use a
+    # non-reentrant Lock, so token bookkeeping must not reacquire it here. Dict
+    # reads/writes are atomic; the registry file lock is the cross-process CAS.
+    token = _turn_reservation_token_ctx.get()
+    if not token and session.get("running"):
+        token = _session_turn_token(sid, session)
+    token = token or uuid.uuid4().hex
+    try:
+        refusal = begin_active_session_turn(lease, turn_token=token)
+        if refusal is None:
+            session["_active_turn_reservation_token"] = token
+        return refusal
+    except Exception as exc:
+        logger.warning("Failed to reserve active session turn for %s: %s", sid, exc, exc_info=True)
+        # Fail CLOSED: an errored reservation has not proven this runtime still owns the session.
+        return _SESSION_OWNERSHIP_UNAVAILABLE
+
+
+class _TurnReservation:
+    """Who owns the registry turn marker right now.
+
+    A reservation is owned by the code that took it until it explicitly hands it to a
+    WORKER. Every path that returns without starting one — a malformed truncation, a watch
+    child mid-run, a cut that cannot be applied, a build that fails or is cancelled — must
+    give it back, or the registry keeps saying "mid-reply" about a turn that never began and
+    the chat can never be moved (or handed off) again.
+    """
+
+    __slots__ = ("refusal", "_sid", "_session", "_kept", "_token")
+
+    def __init__(self, sid: str, session: dict, refusal: str | None):
+        self.refusal = refusal
+        self._sid = sid
+        self._session = session
+        self._kept = False
+        self._token = _session_turn_token(sid, session) if refusal is None else ""
+
+    def keep(self) -> None:
+        """Hand the reservation to the worker this turn just started; it owns the release."""
+        self._kept = True
+
+    def _release_unless_kept(self) -> None:
+        if not self._kept and self.refusal is None:
+            _finish_session_turn(self._sid, self._session)
+
+
+@contextlib.contextmanager
+def _session_turn_reservation(sid: str, session: dict):
+    """Reserve a turn for the body's duration; released on exit unless ``keep()`` was called.
+
+    ``reservation.refusal`` is non-None when ownership could not be re-proven — nothing was
+    reserved in that case, so there is nothing to release either."""
+    reservation = _TurnReservation(sid, session, _reserve_session_turn(sid, session))
+    context_token = (
+        _turn_reservation_token_ctx.set(reservation._token)
+        if reservation.refusal is None else None)
+    try:
+        yield reservation
+    finally:
+        try:
+            reservation._release_unless_kept()
+        finally:
+            if context_token is not None:
+                _turn_reservation_token_ctx.reset(context_token)
+
+
+def _finish_session_turn(sid: str, session: dict | None, turn_token: str | None = None) -> None:
+    """Clear this runtime's registry turn marker. Always AFTER ``running`` drops, never before: the
+    marker may outlive its turn (the chat stays unmovable until the next turn ends — annoying, and
+    fail-closed), where the reverse would advertise an idle owner that is still writing."""
+    if not session:
+        return
+    lease = session.get("active_session_lease")
+    if lease is None:
+        return
+    token = str(turn_token or _session_turn_token(sid, session) or "")
+    if not token:
+        return
+    from hermes_cli.active_sessions import end_active_session_turn
+    end_active_session_turn(lease, turn_token=token)
+    if _session_turn_token(sid, session) == token:
+        session.pop("_active_turn_reservation_token", None)
 
 
 def _attach_lease(session: dict, lease) -> None:
@@ -816,10 +948,14 @@ def _interrupt_session_turn(
             from agent.interrupt_compat import request_hard_interrupt
             request_hard_interrupt(session.get("agent"))
         if not run_thread_alive and not compressing:
+            cleared = False
             with session["history_lock"]:
                 if session.get("running"):
                     session["running"] = False
                     _clear_inflight_turn(session)
+                    cleared = True
+            if cleared:
+                _finish_session_turn(sid, session)
     # Sibling of the #102895 finalize-path fix above: an explicit /stop (or the WS-orphan reaper's
     # interrupt-at-grace) must also reach a background memory/skill review, not just the foreground
     # turn. The review fork is invisible to `should_interrupt`/`run_thread_alive` above (both gated
