@@ -2189,6 +2189,8 @@ class GatewayTurnMixin:
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
             await self._hmwa_post_turn_hooks(hook_ctx, agent_result, response)
+            from gateway.discord_status_card import schedule_status_card
+            schedule_status_card(self, source, session_key, agent_result)
 
             agent_failed_early, hidden_reasoning_incomplete, is_context_overflow_failure = (
                 self._hmwa_classify_turn_failure(agent_result, history, session_entry)
