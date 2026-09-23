@@ -217,7 +217,11 @@ export function AgentModesSettings({ connectionId, profile }: { connectionId: st
             value={delegate.max_concurrency}
           />
         </label>
-        <p>Permissions: read-only. Write/action approvals are not enabled by this editor. No spend cap is promised.</p>
+        <p>
+          Permissions: read-only. Write/action approvals are not enabled by this editor. No spend cap is promised.
+          Stop interrupts workers and discards the answer; an orchestrator request already in flight may still finish
+          and incur usage. Per-role reasoning effort is not supported yet—leave effort at Default.
+        </p>
         <button onClick={() => save('delegate')} type="button">
           Save Delegate settings
         </button>

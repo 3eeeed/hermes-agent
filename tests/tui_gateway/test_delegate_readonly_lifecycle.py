@@ -6,6 +6,182 @@ import pytest
 from tui_gateway.delegate_readonly_lifecycle import run_readonly_delegate
 
 
+def test_admitted_delegate_turn_uses_child_path_not_normal_agent(monkeypatch):
+    import threading
+    from tui_gateway import server
+    from tui_gateway.prompt_execution_modes import build_execution_spec
+    spec = build_execution_spec("delegate", {
+        "orchestrator": {"provider": "openrouter", "model": "judge"},
+        "workers": [{"lane": "research", "provider": "openrouter", "model": "worker"}],
+        "max_iterations": 2, "max_concurrency": 1, "permissions": "read-only"})
+    agent = SimpleNamespace(session_id="delegate-route-stored", interim_assistant_callback=None,
+                            run_conversation=lambda *a, **k: pytest.fail("normal agent ran"))
+    session = {"session_key": agent.session_id, "agent": agent, "history": [],
+               "history_lock": threading.RLock(), "history_version": 0, "running": True,
+               "_execution_mode": "delegate", "_execution_spec": spec}
+    calls, emitted = [], []
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda *a: True)
+    monkeypatch.setattr(server, "_admit_prompt_turn", lambda *a: ([], agent))
+    monkeypatch.setattr(server, "_record_turn_marker", lambda *a, **kw: "marker")
+    monkeypatch.setattr(server, "_prepare_turn_input", lambda *a: ("Question?", "Question?", 80, None))
+    def delegated(sid, sess, st, prompt, text, options):
+        calls.append((prompt, text, options.max_iterations))
+        st.result = {"final_response": "worker-synthesized answer", "messages": []}
+    monkeypatch.setattr(server, "_invoke_delegate", delegated, raising=False)
+    monkeypatch.setattr(server, "_invoke_agent", lambda *a: pytest.fail("normal agent ran"))
+    monkeypatch.setattr(server, "_complete_turn_payload", lambda sess, st, note, cols:
+                        ({"text": st.result["final_response"], "status": "complete"},
+                         st.result["final_response"], "complete"))
+    monkeypatch.setattr(server, "_finish_turn", lambda *a: None)
+    monkeypatch.setattr(server, "_after_complete_turn", lambda *a: None)
+    monkeypatch.setattr(server, "_goal_followup_after_turn", lambda *a: None)
+    monkeypatch.setattr(server, "_publish_session_control_snapshot", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "_emit_settled_session_info", lambda *a: None)
+    monkeypatch.setattr(server, "_finish_session_turn", lambda *a: None)
+    monkeypatch.setattr(server, "_emit", lambda *a: emitted.append(a))
+    assert server._run_prompt_submit("rid", "runtime", session, "Question?", execution_spec=spec)
+    session["_run_thread"].join(timeout=5)
+    assert calls == [("Question?", "Question?", 2)]
+    assert [e[2]["text"] for e in emitted if e[0] == "message.complete"] == ["worker-synthesized answer"]
+
+
+def test_stop_during_inflight_synthesis_discards_answer(monkeypatch):
+    import threading
+    import hermes_cli.runtime_provider as providers
+    import tui_gateway.delegate_readonly_lifecycle as lifecycle
+    monkeypatch.setattr(providers, "resolve_runtime_provider", lambda *, requested, target_model: {
+        "provider": requested, "model": target_model, "base_url": "https://example.invalid/v1", "api_key": "fake"})
+    monkeypatch.setattr(lifecycle, "run_readonly_delegate", lambda *a, **k: [
+        {"status": "completed", "summary": "evidence"}])
+    entered, release, cancel = threading.Event(), threading.Event(), threading.Event()
+    options = {"orchestrator": {"provider": "x", "model": "judge"},
+               "workers": [{"lane": "research", "provider": "x", "model": "worker"}],
+               "max_iterations": 1, "permissions": "read-only"}
+    outcome = []
+    def synth(*args):
+        entered.set()
+        assert release.wait(3)
+        return "Answer that must not be committed"
+    def task():
+        try:
+            outcome.append(lifecycle.run_readonly_delegate_answer(
+                SimpleNamespace(), "Question?", options, profile_home=None,
+                synthesize=synth, cancelled=cancel.is_set))
+        except RuntimeError as exc:
+            outcome.append(str(exc))
+    thread = threading.Thread(target=task)
+    thread.start()
+    assert entered.wait(3)
+    cancel.set()
+    release.set()
+    thread.join(4)
+    assert not thread.is_alive()
+    assert len(outcome) == 1 and "cancelled" in outcome[0].lower()
+
+
+def test_stop_closes_queued_child_that_never_started(monkeypatch):
+    import threading
+    import tools.delegate_tool_results as results
+    import hermes_cli.runtime_provider as providers
+    monkeypatch.setattr(providers, "resolve_runtime_provider", lambda *, requested, target_model: {
+        "provider": requested, "model": target_model, "base_url": "https://example.invalid/v1", "api_key": "fake"})
+    cancel, started, stopped = threading.Event(), threading.Event(), threading.Event()
+    children, closed, called = [], [], []
+    def build(**kw):
+        i = kw["task_index"]
+        child = SimpleNamespace(valid_tool_names={"web_search"},
+                                interrupt=lambda: stopped.set() if i == 0 else None,
+                                close=lambda: closed.append(i))
+        children.append(child)
+        return child
+    def run(index, goal, child, parent):
+        called.append(index)
+        started.set()
+        assert stopped.wait(3)
+        return {"status": "completed", "summary": "late"}
+    monkeypatch.setattr(results, "_build_child_preserving_parent_tools", build)
+    monkeypatch.setattr(results, "_run_child_lifecycle", run)
+    options = {"workers": [{"lane": str(i), "provider": "x", "model": "m"} for i in range(2)],
+               "max_iterations": 1, "max_concurrency": 1}
+    errors = []
+    def task():
+        try:
+            run_readonly_delegate(SimpleNamespace(), "question", options, profile_home=None,
+                                  cancelled=cancel.is_set)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+    thread = threading.Thread(target=task)
+    thread.start()
+    assert started.wait(3)
+    cancel.set()
+    thread.join(4)
+    assert not thread.is_alive()
+    assert errors and "cancelled" in errors[0].lower()
+    assert called == [0]
+    assert closed == [1]
+
+
+def test_stop_during_children_interrupts_and_never_synthesizes(monkeypatch):
+    import threading
+    import tools.delegate_tool_results as results
+    import hermes_cli.runtime_provider as providers
+    from tui_gateway.delegate_readonly_lifecycle import run_readonly_delegate_answer
+    monkeypatch.setattr(providers, "resolve_runtime_provider", lambda *, requested, target_model: {
+        "provider": requested, "model": target_model, "base_url": "https://example.invalid/v1", "api_key": "fake"})
+    started, stopped = threading.Event(), threading.Event()
+    cancel = threading.Event()
+    syntheses, interrupted = [], []
+    def build(**kw):
+        def interrupt():
+            interrupted.append(kw["task_index"])
+            stopped.set()
+        return SimpleNamespace(valid_tool_names={"web_search", "web_extract"},
+                               interrupt=interrupt, close=lambda: None)
+    def run(index, goal, child, parent):
+        started.set()
+        assert stopped.wait(3), "Stop did not interrupt the live child"
+        return {"status": "completed", "summary": "late result"}
+    monkeypatch.setattr(results, "_build_child_preserving_parent_tools", build)
+    monkeypatch.setattr(results, "_run_child_lifecycle", run)
+    options = {"orchestrator": {"provider": "x", "model": "judge"},
+               "workers": [{"lane": "research", "provider": "x", "model": "worker"}],
+               "max_iterations": 2, "permissions": "read-only"}
+    outcome = []
+    def task():
+        try:
+            run_readonly_delegate_answer(SimpleNamespace(), "Question?", options, profile_home=None,
+                                         synthesize=lambda *a: syntheses.append(1) or "late answer",
+                                         cancelled=cancel.is_set)
+        except RuntimeError as exc:
+            outcome.append(str(exc))
+    thread = threading.Thread(target=task)
+    thread.start()
+    assert started.wait(3)
+    cancel.set()
+    thread.join(4)
+    assert not thread.is_alive()
+    assert outcome and "cancelled" in outcome[0].lower()
+    assert interrupted == [0]
+    assert syntheses == []
+
+
+def test_rejects_search_only_worker_before_child_construction(monkeypatch):
+    import hermes_cli.runtime_provider as providers
+    from tui_gateway.prompt_execution_modes import admission_error
+    monkeypatch.setattr(providers, "resolve_runtime_provider", lambda **kw: {
+        "provider": "x", "model": "m", "api_key": "fake", "base_url": "https://example/v1"})
+    options = {"orchestrator": {"provider": "x", "model": "m"},
+               "workers": [{"lane": "research", "provider": "x", "model": "m", "toolsets": ["search"]}],
+               "max_iterations": 1, "permissions": "read-only"}
+    built = []
+    import tools.delegate_tool_results as results
+    monkeypatch.setattr(results, "_build_child_preserving_parent_tools", lambda **kw: built.append(kw))
+    assert admission_error("delegate", options) is not None
+    with pytest.raises(ValueError, match="toolset"):
+        run_readonly_delegate(SimpleNamespace(), "question", options, profile_home=None)
+    assert built == []
+
+
 def test_selected_orchestrator_synthesizes_only_bounded_child_results(monkeypatch):
     import tools.delegate_tool_results as results
     import hermes_cli.runtime_provider as providers
@@ -77,7 +253,7 @@ def test_distinct_real_children_bounded_and_collected(monkeypatch):
         return {"task_index": index, "status": "completed", "summary": child.route}
     monkeypatch.setattr(results, "_build_child_preserving_parent_tools", build)
     monkeypatch.setattr(results, "_run_child_lifecycle", run)
-    options = {"workers": [{"lane": str(i), "provider": f"p{i}", "model": "m", "toolsets": ["safe"]} for i in range(4)],
+    options = {"workers": [{"lane": str(i), "provider": f"p{i}", "model": "m", "toolsets": ["web"]} for i in range(4)],
                "max_iterations": 3, "max_concurrency": 2, "permissions": "read-only"}
     outputs = run_readonly_delegate(SimpleNamespace(), "question", options, profile_home=None)
     assert len({id(c) for c in created}) == 4

@@ -224,6 +224,9 @@ class ComputeHost:
                 if expected_mode == "debate":
                     self._run_isolated_debate(frame, spec)
                     return
+                if expected_mode == "delegate":
+                    self._run_isolated_delegate(frame, spec)
+                    return
                 raise ValueError(f"{expected_mode.capitalize()} mode is unavailable in compute host")
             if frame.get("execution_spec") is not None:
                 require_execution_spec(frame["execution_spec"], expected_mode="normal")
@@ -287,19 +290,38 @@ class ComputeHost:
                 session = server._sessions.get(sid)
                 if session is not None:
                     with session.get("history_lock", threading.Lock()):
-                        if (frame.get("execution_mode") != "debate"
-                                or session.get("_isolated_debate_turn_id") == request_id):
+                        mode = frame.get("execution_mode")
+                        if (mode not in {"debate", "delegate"}
+                                or session.get(f"_isolated_{mode}_turn_id") == request_id):
                             session["running"] = False
                             server._clear_inflight_turn(session)
             self._reply("turn.error", sid, request_id, reason="exception", message=str(exc))
 
     def _run_isolated_debate(self, frame: dict[str, Any], spec: Any) -> None:
         """Compute a proposal only. The parent alone owns SQLite and completion."""
-        from tui_gateway import server
         from tui_gateway.debate_choreography import run_debate
         from tui_gateway.mode_model_call import call_model
         from tui_gateway.prompt_execution_modes import DebateOptions
+        options = DebateOptions.model_validate(spec.options, strict=True)
+        deadline = time.monotonic() + min(240, 30 * (2 * options.rounds + 1) + 15)
+        self._run_isolated_proposal(frame, "debate", lambda session, cancelled: run_debate(
+            frame["text"], options, call_model, cancelled=cancelled,
+            deadline_exceeded=lambda: time.monotonic() >= deadline))
 
+    def _run_isolated_delegate(self, frame: dict[str, Any], spec: Any) -> None:
+        """Execute real read-only children; the answer is still only a proposal."""
+        from tui_gateway.delegate_readonly_lifecycle import run_readonly_delegate_answer
+        def produce(session: dict, cancelled: Any) -> str:
+            if cancelled():
+                raise RuntimeError("isolated Delegate cancelled")
+            answer, _children = run_readonly_delegate_answer(
+                session["agent"], frame["text"], spec.options,
+                profile_home=session.get("profile_home"), cancelled=cancelled)
+            return answer
+        self._run_isolated_proposal(frame, "delegate", produce)
+
+    def _run_isolated_proposal(self, frame: dict[str, Any], mode: str, produce: Any) -> None:
+        from tui_gateway import server
         sid, turn_id = frame["sid"], frame["request_id"]
         row = frame.get("submit_user_row")
         vouch = frame.get("active_session_lease")
@@ -307,47 +329,43 @@ class ComputeHost:
                 or row.get("_db_persisted") is not True or row.get("content") != frame.get("text")
                 or not isinstance(vouch, dict) or not vouch.get("lease_id")
                 or vouch.get("session_id") != frame.get("session_key")
-                or not isinstance(frame.get("debate_nonce"), str)
-                or not frame["debate_nonce"] or frame.get("turn_id") != turn_id
+                or not isinstance(frame.get(f"{mode}_nonce"), str)
+                or not frame[f"{mode}_nonce"] or frame.get("turn_id") != turn_id
                 or type(frame.get("history_version")) is not int):
-            raise RuntimeError("isolated Debate unavailable without admitted parent proof")
+            raise RuntimeError(f"isolated {mode.capitalize()} unavailable without admitted parent proof")
         session = self._ensure_server_session(server, frame)
         server._install_borrowed_lease(sid, session, frame)
         with session["history_lock"]:
             if session.get("running"):
                 raise RuntimeError("session busy")
             session["running"] = True
-            session["_isolated_debate_turn_id"] = turn_id
+            session[f"_isolated_{mode}_turn_id"] = turn_id
             session["_turn_cancel_requested"] = False
         self._reply("turn.started", sid, turn_id, started_ns=now_ns())
         try:
-            options = DebateOptions.model_validate(spec.options, strict=True)
-            deadline = time.monotonic() + min(240, 30 * (2 * options.rounds + 1) + 15)
             def cancelled() -> bool:
                 with session["history_lock"]:
                     return bool(session.get("_turn_cancel_requested") or session.get("_closing"))
             with server._session_profile_runtime_scope(session):
-                answer = run_debate(frame["text"], options, call_model,
-                                    cancelled=cancelled,
-                                    deadline_exceeded=lambda: time.monotonic() >= deadline)
+                answer = produce(session, cancelled)
             if cancelled():
-                raise RuntimeError("isolated Debate cancelled")
+                raise RuntimeError(f"isolated {mode.capitalize()} cancelled")
             # Publishing turn.end lets the parent commit and immediately send
             # the next turn. Retire our running claim BEFORE that callback can
             # replay its newer history into this child.
             with session["history_lock"]:
-                if session.get("_isolated_debate_turn_id") == turn_id:
+                if session.get(f"_isolated_{mode}_turn_id") == turn_id:
                     session["running"] = False
-                    session.pop("_isolated_debate_turn_id", None)
-            self._reply("turn.end", sid, turn_id, ended_ns=now_ns(), debate_result={
-                "turn_id": turn_id, "nonce": frame["debate_nonce"],
+                    session.pop(f"_isolated_{mode}_turn_id", None)
+            self._reply("turn.end", sid, turn_id, ended_ns=now_ns(), **{f"{mode}_result": {
+                "turn_id": turn_id, "nonce": frame[f"{mode}_nonce"],
                 "user_row_id": row["_row_id"], "history_version": frame["history_version"],
-                "answer": answer})
+                "answer": answer}})
         finally:
             with session["history_lock"]:
-                if session.get("_isolated_debate_turn_id") == turn_id:
+                if session.get(f"_isolated_{mode}_turn_id") == turn_id:
                     session["running"] = False
-                    session.pop("_isolated_debate_turn_id", None)
+                    session.pop(f"_isolated_{mode}_turn_id", None)
 
     def _emit_turn_activity(self, sid: str, session: dict, turn_id: str, started_at: float) -> None:
         # Observe the agent clock, never the host heartbeat. A reused agent's last

@@ -332,7 +332,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             except ValueError as exc:
                 _emit("error", sid, {"message": str(exc)})
                 return False
-            if expected_mode != "debate" or queued.get("image_paths"):
+            if expected_mode not in {"debate", "delegate"} or queued.get("image_paths"):
                 _emit("error", sid, {"message": f"{expected_mode.capitalize()} mode is unavailable for this turn"})
                 return False
         # Re-prove ownership and publish this turn BEFORE the queue, the running flag or the
@@ -401,21 +401,39 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
                 dispatch_failed = True
         elif (resp := _submit_prompt_to_compute_host(
                 rid, sid, session, queued["text"], caller_owns_reservation=True, **kwargs)).get("error"):
+            if execution_spec.mode != "normal" and session.get("_closing"):
+                # A pipe write may have reached the child before flush failed.
+                # The accepted row stays in SQLite; do not restore this envelope
+                # and let another turn race the escaped child.
+                with session["history_lock"]:
+                    session["running"] = False
+                _emit_terminal_turn_error(
+                    sid, session, f"Isolated {execution_spec.mode.capitalize()} dispatch uncertain; reopen this chat",
+                    error_surface={"layer": "runtime", "code": "isolated_dispatch_uncertain", "retryable": False})
+            else:
+                with session["history_lock"]:
+                    session.pop("_submit_user_row", None)
+                    _ac_restore_queued(session, queued)
+                    session["running"] = False
+                    _clear_inflight_turn(session)
+                _emit("error", sid, {"message": str((resp.get("error") or {}).get("message") or "queued prompt failed")})
+            dispatch_failed = True
+    except Exception as exc:
+        _notif_log_failure("queued prompt dispatch failed", exc)
+        if use_compute_host and execution_spec.mode != "normal":
+            with session["history_lock"]:
+                session["_closing"] = True
+                session["running"] = False
+            _emit_terminal_turn_error(
+                sid, session, "Isolated mode dispatch uncertain; reopen this chat",
+                error_surface={"layer": "runtime", "code": "isolated_dispatch_uncertain", "retryable": False})
+        else:
             with session["history_lock"]:
                 session.pop("_submit_user_row", None)
                 _ac_restore_queued(session, queued)
                 session["running"] = False
                 _clear_inflight_turn(session)
-            _emit("error", sid, {"message": str((resp.get("error") or {}).get("message") or "queued prompt failed")})
-            dispatch_failed = True
-    except Exception as exc:
-        _notif_log_failure("queued prompt dispatch failed", exc)
-        with session["history_lock"]:
-            session.pop("_submit_user_row", None)
-            _ac_restore_queued(session, queued)
-            session["running"] = False
-            _clear_inflight_turn(session)
-        _emit("error", sid, {"message": f"queued prompt failed: {exc}"})
+            _emit("error", sid, {"message": f"queued prompt failed: {exc}"})
         dispatch_failed = True
     if dispatch_failed:
         # The drain owns the idempotent shared reservation. Restore every local

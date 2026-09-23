@@ -249,7 +249,7 @@ def test_isolated_debate_dispatch_failure_never_falls_back_to_normal(monkeypatch
         assert [row["role"] for row in db.get_messages_as_conversation(key)] == ["user"]
         assert session["history"] == []
         assert len([e for e in emitted if e[0] == "message.complete" and e[2]["status"] == "error"]) == 1
-        assert server.handle_request({"id": 2, "method": "gateway.capabilities", "params": {}})["result"]["execution_modes"] == ["normal", "debate"]
+        assert server.handle_request({"id": 2, "method": "gateway.capabilities", "params": {}})["result"]["execution_modes"] == ["normal", "delegate", "debate"]
     finally:
         with server._sessions_lock:
             server._sessions.pop(sid, None)

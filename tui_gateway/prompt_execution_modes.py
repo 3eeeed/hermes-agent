@@ -25,7 +25,9 @@ class Route(_Options):
 
 class Worker(Route):
     lane: str = Field(min_length=1, max_length=80)
-    toolsets: list[Literal["safe", "search", "web"]] | None = Field(default=None, max_length=3)
+    # The strict child constructor exposes only the web bundle. Do not claim
+    # search-only/safe-only support while web_extract remains available.
+    toolsets: list[Literal["web"]] | None = Field(default=None, max_length=1)
 
 
 class DelegateOptions(_Options):
@@ -99,6 +101,14 @@ def admission_error(mode: str | None, options: dict | None) -> str | None:
         model.model_validate(options, strict=True)
     except ValidationError as exc:
         return f"Invalid {selected} mode options: {exc.errors(include_url=False, include_input=False)}"
-    if selected == "debate":
-        return None  # Per-session isolation/text gates still run before any mutation.
+    if selected == "delegate":
+        # The native child adapter cannot honor reasoning-effort routes yet.
+        # Reject unsupported saved UI settings before staging a user row.
+        payload = options or {}
+        if (not isinstance(payload.get("orchestrator"), dict)
+                or payload["orchestrator"].get("effort") is not None
+                or any(worker.get("effort") is not None for worker in payload["workers"])):
+            return "Delegate mode is unavailable with missing orchestrator or unsupported effort"
+    if selected in {"debate", "delegate"}:
+        return None  # Per-session isolation/text and route gates still run before mutation.
     return f"{selected.capitalize()} mode is unavailable: native child orchestration is not installed; no turn was started"

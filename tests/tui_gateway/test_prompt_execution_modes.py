@@ -43,23 +43,13 @@ def submit(**kwargs):
 ])
 def test_unavailable_native_modes_refuse_before_turn_or_history_mutation(session, mode, options, monkeypatch):
     if mode == "debate":
-        # Inline Debate is supported; exercise an isolated dispatch that cannot
-        # establish parent proof, without starting a real compute process.
+        # Simulate registry-disabled installs with no enabled parent lease.
         monkeypatch.setattr(server, "_session_uses_compute_host", lambda *a, **k: True)
-        monkeypatch.setattr(server, "_submit_prompt_to_compute_host", lambda *a, **k:
-                            {"error": {"code": 5019, "message": "missing parent proof"}})
+        monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *a: None)
     before = (list(session["history"]), session["running"], session["inflight_turn"])
     result = submit(execution_mode=mode, mode_options=options)
-    if mode == "debate":
-        # A missing parent proof after durable acceptance is a terminal error,
-        # never a retryable refusal or an inline Normal fallback.
-        assert result["result"]["status"] == "streaming"
-        assert session["_closing"] is True
-        assert session["running"] is False
-        assert session["history"] == before[0]
-    else:
-        assert result["error"]["message"].lower().find(mode) >= 0
-        assert (session["history"], session["running"], session["inflight_turn"]) == before
+    assert result["error"]["message"].lower().find(mode) >= 0
+    assert (session["history"], session["running"], session["inflight_turn"]) == before
 
 
 @pytest.mark.parametrize("mode,options", [
@@ -86,9 +76,9 @@ def test_invalid_options_do_not_echo_private_values(session):
     assert secret not in result["error"]["message"]
 
 
-def test_gateway_advertises_verified_debate_mode():
+def test_gateway_advertises_verified_native_modes():
     response = server.handle_request({"id": 6, "method": "gateway.capabilities", "params": {}})
-    assert response["result"]["execution_modes"] == ["normal", "debate"]
+    assert response["result"]["execution_modes"] == ["normal", "delegate", "debate"]
 
 
 def test_saved_desktop_delegate_settings_use_the_backend_contract(session):
@@ -99,6 +89,23 @@ def test_saved_desktop_delegate_settings_use_the_backend_contract(session):
     }
     error = admission_error("delegate", options)
     assert error is not None and error.startswith("Delegate mode is unavailable")
+
+
+def test_isolated_delegate_without_lease_refuses_before_durable_acceptance(session, monkeypatch):
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda *a, **k: True)
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *a: None)
+    staged = []
+    monkeypatch.setattr(server, "_persist_submit_user_row", lambda *a, **k: staged.append(1))
+    options = {"orchestrator": {"provider": "openrouter", "model": "judge"},
+               "workers": [{"lane": "research", "provider": "openrouter", "model": "worker"}],
+               "max_iterations": 2, "max_concurrency": 1, "permissions": "read-only"}
+    from tui_gateway.compute_host_bridge import _active_session_lease_vouch
+    assert _active_session_lease_vouch(session) is None
+    response = submit(execution_mode="delegate", mode_options=options, client_send_id="no-lease")
+    assert response["error"]["code"] == 4126
+    assert staged == []
+    assert session["running"] is False
+    assert session["history"] == []
 
 
 def test_mode_intent_changes_send_identity():

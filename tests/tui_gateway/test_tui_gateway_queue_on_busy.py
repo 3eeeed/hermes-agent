@@ -9,6 +9,7 @@ policy: redirect the live turn by default, with the legacy interrupt + queue
 path retained as a compatibility fallback.
 """
 
+import pytest
 import threading
 import time
 import types
@@ -644,14 +645,43 @@ def test_busy_image_prompts_keep_b_and_c_attachments_in_submission_order(monkeyp
 
 # ── _drain_queued_prompt ───────────────────────────────────────────────────
 
-def test_isolated_debate_queue_drain_passes_original_spec_to_parent_dispatch(monkeypatch):
+def test_ambiguous_isolated_delegate_queue_dispatch_quarantines_without_retry(monkeypatch):
     from tui_gateway.prompt_execution_modes import build_execution_spec
-    spec = build_execution_spec("debate", {
-        "side_a": {"provider": "openrouter", "model": "a"},
-        "side_b": {"provider": "openrouter", "model": "b"},
-        "judge": {"provider": "openrouter", "model": "judge"}, "rounds": 1})
-    session = _session(queued_prompt={"text": "debate this", "transport": None,
-                                      "execution_mode": "debate", "execution_spec": spec})
+    spec = build_execution_spec("delegate", {
+        "orchestrator": {"provider": "openrouter", "model": "judge"},
+        "workers": [{"lane": "research", "provider": "openrouter", "model": "worker"}],
+        "max_iterations": 2, "permissions": "read-only"})
+    queued = {"text": "do research", "transport": None, "execution_mode": "delegate",
+              "execution_spec": spec, "submit_user_row": {"_row_id": 17, "_db_persisted": True,
+                                                         "role": "user", "content": "do research"}}
+    session = _session(queued_prompt=queued)
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda *a: True)
+    def uncertain(*a, **kw):
+        session["_closing"] = True  # The child may have received a flushed frame.
+        return {"error": {"code": 5019, "message": "ambiguous pipe flush"}}
+    monkeypatch.setattr(server, "_submit_prompt_to_compute_host", uncertain)
+    completed = []
+    monkeypatch.setattr(server, "_emit_terminal_turn_error", lambda *a, **kw: completed.append(a))
+    assert server._drain_queued_prompt("rid", "sid", session) is True
+    assert session.get("queued_prompt") is None
+    assert session["_closing"] is True
+    assert len(completed) == 1
+    assert server._drain_queued_prompt("next", "sid", session) is False
+
+
+@pytest.mark.parametrize("mode,options", [
+    ("debate", {"side_a": {"provider": "openrouter", "model": "a"},
+                "side_b": {"provider": "openrouter", "model": "b"},
+                "judge": {"provider": "openrouter", "model": "judge"}, "rounds": 1}),
+    ("delegate", {"orchestrator": {"provider": "openrouter", "model": "judge"},
+                  "workers": [{"lane": "research", "provider": "openrouter", "model": "worker"}],
+                  "max_iterations": 2, "max_concurrency": 1, "permissions": "read-only"}),
+])
+def test_isolated_mode_queue_drain_passes_original_spec_to_parent_dispatch(monkeypatch, mode, options):
+    from tui_gateway.prompt_execution_modes import build_execution_spec
+    spec = build_execution_spec(mode, options)
+    session = _session(queued_prompt={"text": "work on this", "transport": None,
+                                      "execution_mode": mode, "execution_spec": spec})
     seen = []
     monkeypatch.setattr(server, "_session_uses_compute_host", lambda *a: True)
     monkeypatch.setattr(server, "_submit_prompt_to_compute_host", lambda *a, **kw:
