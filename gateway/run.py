@@ -4187,7 +4187,20 @@ class GatewayRunner(
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,
+            cwd=self._channel_cwd_for(context.source) or "",
             cron_session="")
+
+    def _channel_cwd_for(self, source) -> str | None:
+        """Folder bound to this chat via ``<platform>.channel_cwds`` (see gateway/channel_cwd.py)."""
+        try:
+            from gateway.channel_cwd import resolve_channel_cwd
+            adapter = self._delivery_adapter_for(source) if hasattr(self, "_delivery_adapter_for") else None
+            adapter = adapter or (getattr(self, "adapters", None) or {}).get(source.platform)
+            extra = getattr(getattr(adapter, "config", None), "extra", None)
+            return resolve_channel_cwd(extra, source.thread_id, source.chat_id, getattr(source, "parent_chat_id", None))
+        except Exception:
+            logger.debug("channel cwd lookup failed", exc_info=True)
+            return None
 
     def _clear_session_env(self, tokens: list) -> None:
         """Restore session context variables to their pre-handler values."""
