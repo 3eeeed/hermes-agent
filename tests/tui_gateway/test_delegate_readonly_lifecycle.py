@@ -6,6 +6,35 @@ import pytest
 from tui_gateway.delegate_readonly_lifecycle import run_readonly_delegate
 
 
+def test_selected_orchestrator_synthesizes_only_bounded_child_results(monkeypatch):
+    import tools.delegate_tool_results as results
+    import hermes_cli.runtime_provider as providers
+    monkeypatch.setattr(providers, "resolve_runtime_provider", lambda *, requested, target_model: {
+        "provider": requested, "model": target_model,
+        "api_key": "private-key", "base_url": "https://provider.example/v1",
+        "api_mode": "chat_completions"})
+    monkeypatch.setattr(results, "_build_child_preserving_parent_tools", lambda **kw: SimpleNamespace(
+        valid_tool_names={"web_search"}, close=lambda: None, route=kw["override_provider"]))
+    monkeypatch.setattr(results, "_run_child_lifecycle", lambda i, goal, child, parent:
+                        {"task_index": i, "status": "completed", "summary": child.route + " finding"})
+    from tui_gateway.delegate_readonly_lifecycle import run_readonly_delegate_answer
+    seen = []
+    def synthesize(route, prompt, max_tokens):
+        seen.append((route.provider, route.model, prompt, max_tokens))
+        return "Final delegated answer"
+    options = {"orchestrator": {"provider": "judge", "model": "judge-model"},
+               "workers": [{"lane": "alpha", "provider": "a", "model": "m"},
+                           {"lane": "beta", "provider": "b", "model": "m"}],
+               "max_iterations": 2, "max_concurrency": 2, "permissions": "read-only"}
+    answer, children = run_readonly_delegate_answer(
+        SimpleNamespace(), "question", options, profile_home=None, synthesize=synthesize)
+    assert answer == "Final delegated answer"
+    assert [c["summary"] for c in children] == ["a finding", "b finding"]
+    assert seen[0][0:2] == ("judge", "judge-model")
+    assert "a finding" in seen[0][2] and "b finding" in seen[0][2]
+    assert "private-key" not in seen[0][2]
+
+
 def test_rejects_missing_profile_route_before_child_construction(monkeypatch):
     import tools.delegate_tool_results as results
     monkeypatch.setattr(results, "_build_child_preserving_parent_tools", lambda **kw: pytest.fail("child built"))
@@ -62,7 +91,7 @@ def test_rejects_fallback_or_mutating_toolset(monkeypatch):
         "provider": requested, "model": target_model, "api_key": "key", "base_url": "https://example/v1"})
     base = {"workers": [{"lane": "a", "provider": "x", "model": "m"}], "max_iterations": 1}
     for change in ({"permissions": "write"}, {"workers": [{**base["workers"][0], "toolsets": ["file"]}]},
-                   {"max_iterations": 0}, {"orchestrator": {"provider": "x", "model": "m"}}):
+                   {"max_iterations": 0}, {"orchestrator": {"provider": "x"}}):
         with pytest.raises(ValueError):
             run_readonly_delegate(SimpleNamespace(), "question", {**base, **change}, profile_home=None)
 
