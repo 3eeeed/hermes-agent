@@ -444,10 +444,18 @@ def _storage_error_data(failure, raw) -> dict:
     return {"code": failure.code, "cause": failure.cause, "details": storage_failure_details(raw)}
 
 
-def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
+def _persist_session_row_for_submit(
+    rid, session, text=None, display_kind=None, reservation=None, *,
+    stage_key: str = "_submit_user_row", release_turn_on_error: bool = True,
+):
     """Lazily persist the DB row now that the user sent a message (a branch becomes real
     here), then the message itself (#111868: a freeze during the first build must leave a
-    resumable transcript); the error reply is the only user-visible signal (desktop maps it to a toast)."""
+    resumable transcript); the error reply is the only user-visible signal (desktop maps it to a toast).
+
+    ``reservation`` is this send's durable claim: it names the row a PREVIOUS attempt at
+    the same message already wrote (adopted instead of written again) and is stamped with
+    the row this attempt writes, the moment it lands.
+    """
     from hermes_state_user_copy import describe_storage_failure
     try:
         if _ensure_session_db_row(session) is False:
@@ -459,7 +467,14 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
                 data=_storage_error_data(failure, _db_error))
         else:
             _persist_branch_seed(session)
-            _persist_submit_user_row(session, text, display_kind)
+            _persist_submit_user_row(
+                session, text, display_kind,
+                adopt_row_id=None if reservation is None else reservation.user_row_id,
+                send_id=None if reservation is None else reservation.send_id,
+                reservation_holder=None if reservation is None else reservation.holder,
+                stage_key=stage_key)
+            if reservation is not None:
+                reservation.user_row_id = _message_row_id(session.get(stage_key) or {})
             return None
     except Exception as exc:
         failure = describe_storage_failure(exc)
@@ -478,12 +493,13 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
                 data=_storage_error_data(failure, exc))
     # No turn thread will start, so neither resume nor the busy queue may see
     # this rejected prompt as live. Release the slot a turn would normally own.
-    with session["history_lock"]:
-        session["running"] = False
-        session["last_active"] = time.time()
-        session.pop("_hosted_room_task", None)
-        _clear_inflight_turn(session)
-        _release_active_session_slot(session)
+    if release_turn_on_error:
+        with session["history_lock"]:
+            session["running"] = False
+            session["last_active"] = time.time()
+            session.pop("_hosted_room_task", None)
+            _clear_inflight_turn(session)
+            _release_active_session_slot(session)
     return error
 
 
@@ -505,6 +521,9 @@ def _run_after_agent_ready(
         with session["history_lock"]:
             session["running"] = False
             session["last_active"] = time.time()
+        # This worker owned the submit's reservation and is returning without running a
+        # turn: give it back, or the chat stays "mid-reply" for good (#see _TurnReservation).
+        _finish_session_turn(sid, session)
         _emit("session.info", sid, _session_info(session.get("agent"), session))
         return
     with session["history_lock"]:
@@ -516,7 +535,12 @@ def _run_after_agent_ready(
                 "Turn cancelled before the agent was ready"
                 if session.get("_turn_cancel_requested")
                 else "Session no longer running before the agent was ready")})
-            return
+            cancelled_before_ready = True
+        else:
+            cancelled_before_ready = False
+    if cancelled_before_ready:
+        _finish_session_turn(sid, session)  # same: no turn will run under this reservation
+        return
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
         terminal_callback=hosted_terminal_callback, turn_author=turn_author)
@@ -524,6 +548,16 @@ def _run_after_agent_ready(
 
 _TRUNCATION_PARAMS = (
     "truncate_before_user_ordinal", "truncate_before_row_id", "truncate_before_message_id")
+
+
+def _ownership_error_data(refusal) -> dict:
+    """The machine-readable half of a 4090. ``ownership`` is the live owner's handoff
+    precondition (lease id + fencing generation + how long, busy or not) — what
+    ``session.handoff.claim`` needs echoed back, and nothing about the owner's host."""
+    data = {"reason": getattr(refusal, "reason", "") or ""}
+    if (ownership := getattr(refusal, "ownership", None)):
+        data["ownership"] = ownership
+    return data
 
 
 def _lock_in_submit_turn(
@@ -534,26 +568,43 @@ def _lock_in_submit_turn(
     with _session_turn_admission(session) as admitted:
         if not admitted:
             return _err(rid, 5035, "backend is retiring; reconnect to continue"), fields
-        # A watch session's run lives in the PARENT turn (own running flag False); typing
-        # mid-run would build a second agent racing the child on the same stored session.
-        if session.get("lazy") and _child_run_active(str(session.get("session_key") or "")):
-            return _err(rid, 4009, "subagent still running — wait for it to finish"), fields
-        if is_truthy_value(params.get("confirm_truncate")) and not has_truncation:
-            return _err(
-                rid, 4004,
-                "confirm_truncate requires truncate_before_user_ordinal, truncate_before_message_id, or truncate_before_row_id",
-            ), fields
-        if has_truncation:
-            err, fields = _truncate_history_for_submit(
-                rid, sid, session, params, requested_rebind_ids)
-            if err is not None:
-                return err, {}
-        session["running"] = True
-        session["_turn_cancel_requested"] = False
-        session["last_active"] = time.time()
-        if hosted_task is not None:
-            session["_hosted_room_task"] = dict(hosted_task)
-        _start_inflight_turn(session, text, display_kind=display_kind)
+        # Re-prove ownership and PUBLISH this turn before the truncation below, which is a
+        # destructive replace_messages(). A lease attached before another device claimed the
+        # chat names a superseded fencing generation; cutting rows on its authority is exactly
+        # the double-writer damage the fence exists to prevent. The reservation also makes this
+        # turn visible as busy, so a concurrent handoff is refused instead of racing the cut.
+        #
+        # Held by THIS scope until the turn is locked in; every refusal below returns without
+        # a worker, so the scope gives the marker back rather than stranding the chat as
+        # permanently mid-reply.
+        with _session_turn_reservation(sid, session) as reservation:
+            if reservation.refusal is not None:
+                reason = getattr(reservation.refusal, "reason", None)
+                return _err(rid, 4090, str(reservation.refusal),
+                            _ownership_error_data(reservation.refusal) if reason else None), fields
+            # A watch session's run lives in the PARENT turn (own running flag False); typing
+            # mid-run would build a second agent racing the child on the same stored session.
+            if session.get("lazy") and _child_run_active(str(session.get("session_key") or "")):
+                return _err(rid, 4009, "subagent still running — wait for it to finish"), fields
+            if is_truthy_value(params.get("confirm_truncate")) and not has_truncation:
+                return _err(
+                    rid, 4004,
+                    "confirm_truncate requires truncate_before_user_ordinal, truncate_before_message_id, or truncate_before_row_id",
+                ), fields
+            if has_truncation:
+                err, fields = _truncate_history_for_submit(
+                    rid, sid, session, params, requested_rebind_ids)
+                if err is not None:
+                    return err, {}
+            session["running"] = True
+            session["_turn_cancel_requested"] = False
+            session["last_active"] = time.time()
+            if hosted_task is not None:
+                session["_hosted_room_task"] = dict(hosted_task)
+            _start_inflight_turn(session, text, display_kind=display_kind)
+            # The turn is locked in: from here the worker (inline runner, compute-host child,
+            # or the deferred-build thread) owns the release.
+            reservation.keep()
     return None, fields
 
 
@@ -561,8 +612,300 @@ def _lock_in_submit_turn(
 _CLIENT_SURFACES = frozenset({"hud", "voice-live"})
 
 
+# How many accepted send ids one session remembers IN MEMORY. This is only a cache in
+# front of the durable ledger (a retry for the current message, or a handful behind it
+# after a reconnect, is answered without touching the store); the store is the authority
+# and has its own, longer retention. Bounded so a long conversation cannot accumulate a
+# record per turn.
+_ACCEPTED_SEND_ID_LIMIT = 64
+
+
+def _remembered_send_result(session: dict | None, send_id: str, digest: str) -> dict | None:
+    """The acceptance this session already gave for ``send_id`` and THIS payload, if any.
+
+    Digest-matched, not id-matched: the same id carrying a different message is a
+    conflict for the ledger to refuse, never something this cache may answer."""
+    if not session:
+        return None
+    with session["history_lock"]:
+        remembered = (session.get("_accepted_send_ids") or {}).get(send_id)
+    if not isinstance(remembered, dict) or remembered.get("digest") != digest:
+        return None
+    return dict(remembered.get("result") or {})
+
+
+def _remember_send_result(session: dict | None, send_id: str, digest: str, result: dict) -> None:
+    if not session:
+        return
+    with session["history_lock"]:
+        accepted = dict(session.get("_accepted_send_ids") or {})
+        accepted[send_id] = {"digest": digest, "result": dict(result)}
+        while len(accepted) > _ACCEPTED_SEND_ID_LIMIT:
+            accepted.pop(next(iter(accepted)))
+        session["_accepted_send_ids"] = accepted
+
+
+# Submit params that are not part of the MESSAGE: the runtime session id is re-minted by
+# every reconnect (the ledger is keyed by the STORED id instead), ``profile`` only names
+# which store to look in, and ``client_send_id`` is the key itself.
+_SEND_DIGEST_IGNORED_PARAMS = frozenset({
+    "session_id", "profile", "client_send_id", "staged_attachment_paths"})
+
+
+def _send_payload_digest(params: dict) -> str:
+    """Canonical digest of everything this submit MEANS, or "" when it cannot be taken.
+
+    Deny-list, not allow-list: every param that is not explicitly transient counts, so the
+    text, the display kind, the truncation target and its confirmations, the rebind list,
+    the surface, the voice context — and any field added later — all change the digest. An
+    id may only ever replay the acceptance of the exact message it was minted for.
+
+    ``_``-prefixed params are gateway-stamped internals (turn author, hosted-room proof)
+    no client can send, and those paths carry no send id at all.
+
+    Attached image bytes deliberately do not participate: they ride the session
+    (``image.attach``). ``staged_attachment_paths`` is attempt-local evidence rather
+    than message meaning and is used only to consume copies this retry really staged.
+    """
+    payload = {
+        key: value for key, value in params.items()
+        if not key.startswith("_") and key not in _SEND_DIGEST_IGNORED_PARAMS}
+    try:
+        canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        # Nothing off the wire can land here (it was JSON a moment ago). An internal caller
+        # that passes an exotic value keeps the in-memory behaviour rather than failing.
+        logger.warning("prompt.submit: send payload is not canonicalisable; durable dedup skipped")
+        return ""
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _consume_replayed_attachments(session: dict | None, params: dict) -> None:
+    """Consume image occurrences re-staged solely to retry an accepted send.
+
+    ``image.attach*`` rides ahead of ``prompt.submit`` on every runtime. When the
+    durable ledger answers a lost-response retry without entering the submit
+    pipeline, those copies otherwise remain in ``attached_images`` and are picked
+    up by the next, unrelated turn. The client names only paths it staged during
+    THIS request; remove one newest matching occurrence per path and nothing else.
+    """
+    paths = params.get("staged_attachment_paths")
+    if not session or not isinstance(paths, list) or not paths:
+        return
+    wanted = [str(path) for path in paths if isinstance(path, str) and path]
+    if not wanted:
+        return
+    with session["history_lock"]:
+        remaining = list(session.get("attached_images") or [])
+        for path in wanted:
+            # Staging appends. Remove the newest matching occurrence so an older,
+            # separately staged same-path attachment remains owned by its turn.
+            for index in range(len(remaining) - 1, -1, -1):
+                if remaining[index] == path:
+                    remaining.pop(index)
+                    break
+        session["attached_images"] = remaining
+
+
+def _send_reservation_holder(sid: str) -> str:
+    """Who holds a reservation. The ``pid=`` tail is load-bearing: a reservation whose
+    process is provably gone is reclaimable, the same kernel-proof rule the turn lease
+    uses — a backend killed mid-submit must not wedge the user's message forever."""
+    from hermes_state_send_ledger import prompt_send_host_identity
+    return f"submit:{sid or '-'}:host={prompt_send_host_identity()}:pid={os.getpid()}"
+
+
+class _SendReservation:
+    """This process's claim on one (stored session, client send id), held from before the
+    first mutation until the submit has an answer.
+
+    A row bind or acceptance is required durable state. The guarded worker is not
+    exposed until ``accept`` commits, so write failure can release safely and retry.
+    """
+
+    def __init__(self, session: dict, key: str, send_id: str, holder: str, user_row_id):
+        self.session, self.key, self.send_id, self.holder = session, key, send_id, holder
+        #: Durable user row a previous attempt at this send left in the transcript.
+        self.user_row_id = user_row_id
+        self.accepted = False
+
+    def record_user_row(self, user_row_id) -> None:
+        """Stamp the row this attempt just wrote, as soon as it lands — if the backend dies
+        before the acceptance, the retry adopts it instead of posting the message twice."""
+        if not isinstance(user_row_id, int) or user_row_id == self.user_row_id:
+            return
+        self._write_required(lambda db: db.record_prompt_send_user_row(
+            self.key, self.send_id, user_row_id, holder=self.holder))
+        self.user_row_id = user_row_id
+
+    def accept(self, result: dict) -> None:
+        if self.accepted:
+            return
+        self._write_required(lambda db: db.accept_prompt_send(
+            self.key, self.send_id, result, holder=self.holder))
+        self.accepted = True
+
+    def release(self) -> None:
+        self._write(lambda db: db.release_prompt_send(self.key, self.send_id, holder=self.holder))
+
+    def _write(self, call) -> None:
+        try:
+            with _session_db(self.session) as db:
+                if db is not None:
+                    call(db)
+        except Exception:
+            logger.warning(
+                "prompt.submit: send ledger write failed for %s/%s", self.key, self.send_id,
+                exc_info=True)
+
+    def _write_required(self, call) -> None:
+        """A row stamp/acceptance is part of the exactly-once proof, not logging.
+
+        Returning success after either write failed leaves only process memory as
+        evidence and permits a restarted backend to post or run the send again.
+        """
+        with _session_db(self.session) as db:
+            if db is None or call(db) is not True:
+                raise RuntimeError("durable prompt-send ledger transition was not applied")
+
+
+# The terminal answer to a send that provably started no turn: whatever the gateway had
+# already done for it has been given back, so the only honest thing to tell the client is
+# that no reply is coming and the message is theirs to send again.
+_UNSTARTABLE_SEND_MSG = (
+    "This message could not be started, so no reply is coming: {exc}. Send it again.")
+
+_SEND_LEDGER_UNAVAILABLE_MSG = (
+    "This message was not sent: the gateway could not record it as sent exactly once, so it "
+    "refused to risk posting it twice. Send it again.")
+
+
+def _open_send_reservation(rid, session: dict | None, send_id: str, digest: str):
+    """Claim this send BEFORE anything is mutated: ``(reservation, replay, err)``.
+
+    At most one of the three is set; all three None means "no durable identity here" —
+    an unsaved draft has no stored session to key a ledger on, and a context with no store
+    keeps the in-memory behaviour exactly as it was.
+
+    ``replay`` is the answer a duplicate gets: the acceptance already given, or — for a
+    request still in flight under a live holder — a deterministic accepted one, which is
+    what the client needs to stop holding the message. ``err`` is either fail-closed (this
+    id belongs to a different message) or retryable (the store could not answer, and
+    because the reservation comes first, nothing has happened yet).
+    """
+    key = str((session or {}).get("session_key") or "")
+    if not session or not key or not digest:
+        return None, None, None
+    holder = _send_reservation_holder(str(session.get("_sid") or ""))
+    try:
+        with _session_db(session) as db:
+            verdict = None if db is None else db.reserve_prompt_send(
+                key, send_id, digest, holder=holder)
+    except Exception as exc:
+        logger.warning(
+            "prompt.submit: send ledger unavailable for %s/%s: %s", key, send_id, exc,
+            exc_info=True)
+        return None, None, _err(rid, 5074, _SEND_LEDGER_UNAVAILABLE_MSG, data={"retryable": True})
+    if verdict is None:
+        return None, None, None
+    if verdict.outcome == "conflict":
+        logger.warning(
+            "prompt.submit: REFUSED send_id=%s on session %s — it was already used for a "
+            "different message", send_id, key)
+        return None, None, _err(
+            rid, 4125,
+            "this client_send_id was already used for a different message; "
+            "mint a new one per message and reuse it only to retry that message",
+            data={"client_send_id": send_id})
+    if verdict.outcome == "accepted":
+        return None, dict(verdict.result or {"status": "streaming"}), None
+    if verdict.outcome == "in_progress":
+        # The holder has not accepted yet and may still fail/release. Reporting
+        # success here would make the overtaking client discard the only preserved
+        # copy of a message for which no turn is guaranteed.
+        return None, None, _err(
+            rid, 4094, "this send is still being accepted; retry it unchanged",
+            data={"client_send_id": send_id, "retryable": True})
+    return _SendReservation(session, key, send_id, holder, verdict.user_row_id), None, None
+
+
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
+    """End-to-end idempotency wrapper around the submit pipeline.
+
+    A client that mints one immutable ``client_send_id`` per user message can retry that
+    message safely: if the acceptance reached us and only the RESPONSE was lost — the
+    ordinary shape of a dropped WebSocket, and exactly the socket a "Move here" resend
+    rides — the retry is answered with the acceptance already given instead of posting the
+    message a second time and running a second turn.
+
+    The record of that acceptance lives in the profile's ``state.db`` keyed by the STORED
+    session id (``hermes_state_send_ledger``), because every ordering that matters escapes
+    a live dict: two requests in flight at once, a retry after the chat resumed under a new
+    runtime id, a backend that restarted, a second ``hermes serve`` process on another
+    machine. The reservation is taken before any history, queue, attachment, user-row,
+    running-state or turn mutation, and given back if the submit is refused.
+
+    A send without an id (older clients, every internal path) keeps its exact previous
+    behaviour.
+    """
+    send_id = str(params.get("client_send_id") or "").strip()
+    if not send_id:
+        return _submit_prompt(rid, params)
+    session = _sessions.get(str(params.get("session_id") or ""))
+    digest = _send_payload_digest(params)
+    if (remembered := _remembered_send_result(session, send_id, digest)) is not None:
+        _consume_replayed_attachments(session, params)
+        logger.info("prompt.submit replay for send_id=%s answered from its first acceptance", send_id)
+        return _ok(rid, remembered)
+    reservation, replay, err = _open_send_reservation(rid, session, send_id, digest)
+    if err is not None:
+        return err
+    if replay is not None:
+        _consume_replayed_attachments(session, params)
+        logger.info(
+            "prompt.submit replay for send_id=%s answered from the durable send ledger", send_id)
+        return _ok(rid, replay)
+    try:
+        response = _submit_prompt(rid, params, reservation=reservation)
+    except Exception as exc:
+        # The reservation comes BEFORE the first mutation, so anything that throws between
+        # the two leaves this process's row `in_progress` under a holder that is provably
+        # doing nothing — and a live holder is not reclaimable, so for the whole reservation
+        # TTL every retry is answered "streaming" for a turn that never ran. That silently
+        # drops the very message the client preserved for this case, which is worse than
+        # any double-post risk here: give the claim back on the way out.
+        #
+        # `release` writes only a row THIS holder still owns `in_progress` (one transaction,
+        # holder- and state-matched), so an acceptance that did land, or a takeover by
+        # another process, is left exactly as it is — and a durable user row already stamped
+        # keeps the row as `failed` carrying it, so the retry adopts it rather than posting
+        # the message twice.
+        logger.exception(
+            "prompt.submit: unexpected failure after reserving send_id=%s", send_id)
+        if reservation is not None:
+            reservation.release()
+        return _err(rid, 5073, _UNSTARTABLE_SEND_MSG.format(exc=exc))
+    if response.get("error"):
+        if reservation is not None and not reservation.accepted:
+            # Refused before durable acceptance: hand the reservation back so the
+            # immutable send can be retried. Once accepted, an async runtime failure
+            # is terminal for this send and release deliberately cannot resurrect it.
+            reservation.release()
+        return response
+    result = response.get("result") or {}
+    if reservation is not None and not reservation.accepted:
+        try:
+            reservation.accept(result)
+        except Exception:
+            logger.exception("prompt.submit: durable acceptance failed for send_id=%s", send_id)
+            reservation.release()
+            return _err(rid, 5074, _SEND_LEDGER_UNAVAILABLE_MSG, data={"retryable": True})
+    _remember_send_result(session, send_id, digest, result)
+    return response
+
+
+def _submit_prompt(rid, params: dict, reservation=None) -> dict:
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
     sid = params.get("session_id", "")
     raw_text = params.get("text", "")
@@ -602,9 +945,12 @@ def _(rid, params: dict) -> dict:
         return err
     if (limit_message := _ensure_active_session_slot(sid, session)) is not None:
         # Refused HERE — before the busy queue, db row and agent build — so a refusal
-        # leaves the session untouched.  The reason travels as machine-readable data.
+        # leaves the session untouched.  The reason travels as machine-readable data, with
+        # the live owner's handoff precondition when there is one, so the client can offer
+        # "move it here" instead of only "start a new chat".
         reason = getattr(limit_message, "reason", None)
-        return _err(rid, 4090, str(limit_message), {"reason": reason} if reason else None)
+        return _err(rid, 4090, str(limit_message),
+                    _ownership_error_data(limit_message) if reason else None)
     # Rewritten every submit: a session alternates app window / HUD / live voice; a stale value misinforms.
     session["client_surface"] = params.get("surface") if params.get("surface") in _CLIENT_SURFACES else ""
     # Live-voice delegations carry the recent spoken transcript for the MODEL INPUT only (the persisted
@@ -648,8 +994,19 @@ def _(rid, params: dict) -> dict:
             # built for exactly this race — see desktop's `runRewindSubmit`) waits
             # for `running` to clear and resubmits with the truncation intact.
             return _err(rid, 4009, "session busy")
+        queued_submit_user_row = None
+        if reservation is not None and not reservation.accepted:
+            queued_stage_key = "_queued_submit_user_row"
+            if (persist_err := _persist_session_row_for_submit(
+                    rid, session, text, display_kind, reservation=reservation,
+                    stage_key=queued_stage_key, release_turn_on_error=False)) is not None:
+                return persist_err
+            queued_submit_user_row = session.pop(queued_stage_key, None)
         busy_response = _handle_busy_submit(
-            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author)
+            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")),
+            turn_author=turn_author,
+            accept_send=None if reservation is None else reservation.accept,
+            submit_user_row=queued_submit_user_row)
         if busy_response is not None:
             return busy_response
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
@@ -660,40 +1017,100 @@ def _(rid, params: dict) -> dict:
         rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
     if err is not None:
         return err
+    if (err := _persist_session_row_for_submit(
+            rid, session, text, display_kind,
+            reservation=(reservation if reservation is None or not reservation.accepted else None))) is not None:
+        # Locked in, but no worker will ever start: release the turn (and its reservation)
+        # rather than leave the session latched busy and the chat unmovable.
+        with session["history_lock"]:
+            session["running"] = False
+            _clear_inflight_turn(session)
+        _finish_session_turn(sid, session)
+        return err
+
+    # The transcript row (inline) and turn reservation are now durable, but no
+    # worker/compute child has been exposed yet. Settle exactly-once acceptance
+    # before anything can perform model, tool, or external side effects.
+    accepted_result = {"status": "streaming", **survivor_fields}
+    if reservation is not None and not reservation.accepted:
+        try:
+            reservation.accept(accepted_result)
+        except Exception:
+            logger.exception("prompt.submit: durable acceptance failed before dispatch for send_id=%s", reservation.send_id)
+            with session["history_lock"]:
+                session["running"] = False
+                _clear_inflight_turn(session)
+            _finish_session_turn(sid, session)
+            return _err(rid, 5074, _SEND_LEDGER_UNAVAILABLE_MSG, data={"retryable": True})
+
     if turn_isolation:
         if turn_author:
             logger.debug("isolated compute turns carry no author yet; the turn from %s runs unattributed",
                          turn_author.get("id"))
         isolated_response = _submit_prompt_to_compute_host(
-            rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata)
+            rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
+            caller_owns_reservation=True)
         if not isolated_response.get("error"):
-            # The truncation already happened inline above (memory + DB).
             isolated_response["result"].update(survivor_fields)
             return isolated_response
-        # An ordinal/id alone is not consent. A client that carries a leftover ordinal into an ORDINARY
-        # submit sends a request that is indistinguishable, field by field, from a real rewind — same
-        # method, same shape, an in-range target — and the cut it asks for is a destructive
-        # replace_messages() the user never requested (#80763: 296 -> 52 messages, 244 durable rows gone).
-        # Only the client knows whether this submit is a rewind/edit/regenerate, so it has to say so; refuse
-        # the cut when it doesn't. Consent is checked BEFORE target resolution: an unconfirmed
-        # (leaked-state) request must refuse with 4029 without paying the durable transcript read or
-        # heal-stamping live history dicts that row-id resolution performs.
         logger.warning(
             "compute-host dispatch failed for session %s; falling back inline: %s", sid,
             isolated_response["error"].get("message", "unknown error"))
-    if (err := _persist_session_row_for_submit(rid, session, text, display_kind)) is not None:
-        return err
-    # A completed FAILED build must not wedge the session: rebuild, don't replay it.
-    if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
-        _start_agent_build(sid, session)
-    run_thread = threading.Thread(
-        target=lambda: _run_after_agent_ready(
-            rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author),
-        daemon=True)
-    # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
-    session["_run_thread"] = run_thread
-    run_thread.start()
+        # The child never started. The parent still owns the exact submit-time
+        # row staged above, so the inline fallback adopts it without a second
+        # transcript append.
+    # Locked in, worker not born yet: the reservation already belongs to a thread that does
+    # not exist. Build start, Thread() and start() can all raise (a throwing build helper,
+    # "can't start new thread" out of an exhausted process), and each leaves nobody to clear
+    # `running` or the shared busy marker — a chat stuck mid-reply on every device.
+    run_thread = None
+    try:
+        # A completed FAILED build must not wedge the session: rebuild, don't replay it.
+        if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
+            _start_agent_build(sid, session)
+        run_thread = threading.Thread(
+            target=lambda: _run_after_agent_ready(
+                rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author),
+            daemon=True)
+        # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
+        session["_run_thread"] = run_thread
+        run_thread.start()
+    except Exception as exc:
+        return _abandon_unstarted_turn(
+            rid, sid, session, run_thread, exc,
+            accepted=bool(reservation is not None and reservation.accepted))
+    # Past `start()` the worker owns the release; this path must never finish the turn again.
     return _ok(rid, {"status": "streaming", **survivor_fields})
+
+
+def _abandon_unstarted_turn(rid, sid, session, run_thread, exc, *, accepted: bool = False) -> dict:
+    """Give a locked-in turn back when its worker never started, then refuse the submit.
+
+    The mirror of ``_persist_session_row_for_submit``'s release: drop ``running`` and the
+    in-flight turn first, then hand the reservation back exactly once — the marker is
+    cleared only AFTER ``running`` falls, or another device could claim a chat this one is
+    still unwinding. The dead handle goes too: ``session.interrupt`` reads it to tell a live
+    turn from a stuck flag, and a thread that never ran would make it report a phantom."""
+    logger.warning(
+        "prompt.submit: no turn worker started for session %s; releasing the turn: %s",
+        sid, exc, exc_info=True)
+    with session["history_lock"]:
+        session["running"] = False
+        session["last_active"] = time.time()
+        session.pop("_hosted_room_task", None)
+        _clear_inflight_turn(session)
+        if run_thread is not None and session.get("_run_thread") is run_thread:
+            session.pop("_run_thread", None)
+    _finish_session_turn(sid, session)
+    if accepted:
+        # Exactly-once acceptance is irrevocable. Surface a terminal runtime
+        # failure instead of returning a retryable error that could execute the
+        # same send again after a lost response.
+        _emit_terminal_turn_error(
+            sid, session, f"Turn worker could not start: {exc}",
+            error_surface={"layer": "runtime", "code": "turn_start_failed", "retryable": False})
+        return _ok(rid, {"status": "streaming"})
+    return _err(rid, 5073, _UNSTARTABLE_SEND_MSG.format(exc=exc))
 
 
 # ── attachments ─────────────────────────────────────────────────────────────

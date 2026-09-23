@@ -1513,6 +1513,10 @@ class SessionSessionsMixin:
             )
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            # Send reservations are keyed by the STORED session id and pruned per chat on
+            # the next submit — a chat that will never get another submit has to be swept
+            # here or its ledger rows outlive it forever.
+            conn.execute("DELETE FROM prompt_send_ledger WHERE session_key = ?", (session_id,))
             self._delete_unreferenced_system_prompts(conn)
             removed_ids.append(session_id)
             return True
@@ -1569,6 +1573,8 @@ class SessionSessionsMixin:
                 )
                 conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
                 conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
+                conn.execute(  # same sweep as delete_session(): no chat left to prune them
+                    f"DELETE FROM prompt_send_ledger WHERE session_key IN ({ph})", chunk)
             self._delete_unreferenced_system_prompts(conn)
             removed_ids.extend(existing)
             return len(existing)

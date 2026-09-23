@@ -247,11 +247,16 @@ export function notify(input: NotificationInput): string {
   return id
 }
 
-export function notifyError(error: unknown, fallback: string, options: { action?: NotificationAction } = {}): string {
+export function notifyError(
+  error: unknown,
+  fallback: string,
+  options: Pick<NotificationInput, 'action' | 'id'> = {}
+): string {
   const readable = readableError(error, fallback)
   const poolSlotTimeout = isLocalBackendSlotWaitTimeout(error)
 
   return notify({
+    id: options.id,
     action: poolSlotTimeout
       ? {
           label: translateNow('desktop.poolSlotTimeoutOpenSettings'),

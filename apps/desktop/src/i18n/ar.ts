@@ -2872,6 +2872,9 @@ export const ar = defineLocale({
       },
       errorRetry: 'إعادة المحاولة',
       errorStartNewSession: 'بدء جلسة جديدة',
+      errorMoveSessionHere: 'نقل إلى هنا',
+      errorMoveSessionFailed: 'تعذّر نقل هذه المحادثة إلى هنا',
+      errorMoveSessionBusy: 'تلك المحادثة في منتصف الرد على الجهاز الآخر. انتظر حتى تنتهي، ثم انقلها إلى هنا.',
       errorSwitchProvider: 'تبديل المزوّد',
       errorSignInAgain: provider => `تسجيل الدخول إلى ${provider} مجدداً`,
       errorOauthExpired: provider =>

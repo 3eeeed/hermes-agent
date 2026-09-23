@@ -3549,6 +3549,13 @@ export interface Translations {
       errorRetry: string
       /** Escape hatch when Retry would only reproduce SESSION_NOT_OWNED (#106217). */
       errorStartNewSession: string
+      /** Take over a chat another device owns (`session.handoff.claim`), then
+       *  finish the send the fence refused. */
+      errorMoveSessionHere: string
+      /** The move was refused or failed; the draft and attachments are kept. */
+      errorMoveSessionFailed: string
+      /** The owner is mid-reply: a chat is never taken over while it is writing. */
+      errorMoveSessionBusy: string
       errorSwitchProvider: string
       errorChooseModel: string
       errorCompressConversation: string

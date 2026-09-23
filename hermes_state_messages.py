@@ -305,6 +305,53 @@ class SessionMessagesMixin:
         # holding the lock for seconds (VACUUM, checkpoint) can't kill it.
         return self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 
+    def append_prompt_send_user_message(
+        self, session_id: str, *, send_id: str, holder: str, content: str,
+        display_kind: Optional[str] = None, timestamp: Any = None,
+    ) -> int:
+        """Append a submit-time user row and bind it to its reservation atomically.
+
+        A committed transcript row without ``prompt_send_ledger.user_row_id`` cannot be
+        recognised after a crash and would be appended again by the retry. Both writes
+        share one transaction; a lost reservation rolls the insert and counter bump back.
+        """
+        if not session_id or not send_id or not holder:
+            raise ValueError("prompt-send message append requires session, send and holder ids")
+        message_timestamp = _coerce_timestamp(timestamp, time.time())
+        params = self._message_row_params(
+            session_id, "user", {"content": content, "display_kind": display_kind},
+            None, message_timestamp, keep_reasoning=True)
+
+        def _do(conn):
+            ledger = conn.execute(
+                "SELECT state, holder, user_row_id FROM prompt_send_ledger "
+                "WHERE session_key = ? AND client_send_id = ?",
+                (session_id, send_id),
+            ).fetchone()
+            if ledger is None or ledger[0] != "in_progress" or ledger[1] != holder:
+                raise RuntimeError("prompt-send reservation was lost before transcript append")
+            if ledger[2] is not None:
+                existing = conn.execute(
+                    "SELECT role FROM messages WHERE session_id = ? AND id = ? AND active = 1",
+                    (session_id, int(ledger[2])),
+                ).fetchone()
+                if existing is not None and existing[0] == "user":
+                    return int(ledger[2])
+            self._check_transcript_write_guards(conn, session_id, None)
+            row_id = conn.execute(_INSERT_MESSAGE_SQL, params).lastrowid
+            self._bump_session_counters(conn, session_id, 1, 0, unit=True)
+            changed = conn.execute(
+                "UPDATE prompt_send_ledger SET user_row_id = ?, updated_at = ? "
+                "WHERE session_key = ? AND client_send_id = ? AND holder = ? "
+                "AND state = 'in_progress' AND user_row_id IS NULL",
+                (row_id, time.time(), session_id, send_id, holder),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("prompt-send row binding was not applied")
+            return int(row_id)
+
+        return self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
+
     def append_delegation_delivery(self, session_id: str, content: str, metadata: Dict[str, Any]) -> int:
         """Record a detached API result once, between client turns, including replay after rotation.
 

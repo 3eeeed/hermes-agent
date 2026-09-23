@@ -3339,6 +3339,9 @@ export const ja = defineLocale({
       },
       errorRetry: '再試行',
       errorStartNewSession: '新しいセッションを開始',
+      errorMoveSessionHere: 'ここに移動',
+      errorMoveSessionFailed: 'このチャットをここに移動できませんでした',
+      errorMoveSessionBusy: 'そのチャットは別のデバイスで返信中です。完了してからここに移動してください。',
       errorSwitchProvider: 'プロバイダーを切り替え',
       errorSignInAgain: provider => `${provider} に再度サインイン`,
       errorOauthExpired: provider =>

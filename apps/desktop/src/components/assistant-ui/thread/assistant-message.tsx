@@ -38,6 +38,7 @@ import { errorRecoveryPlan, type ErrorSurface, formatErrorDiagnostics, isOAuthRe
 import { errorCardText } from '@/lib/error-surface-copy'
 import { triggerHaptic } from '@/lib/haptics'
 import {
+  ArrowRightLeft,
   AudioLines,
   GitForkIcon,
   KeyRound,
@@ -54,12 +55,13 @@ import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
 import { playSpeechText, stopVoicePlayback } from '@/lib/voice-playback'
 import { openFreeTierSignIn } from '@/store/free-tier-sign-in'
-import { notifyError } from '@/store/notifications'
+import { dismissNotification, notifyError } from '@/store/notifications'
 import { startManualProviderOAuth } from '@/store/onboarding'
 import { $activeGatewayProfile, normalizeProfileKey, requestFreshSession } from '@/store/profile'
 import { sessionApprovalRequest } from '@/store/prompts'
 import { requestSendDiagnostics } from '@/store/send-diagnostics'
 import { $connection, $currentModel, setModelPickerOpen } from '@/store/session'
+import { $pendingSessionMoves, canMoveSessionHere, moveSessionHere } from '@/store/session-move'
 import { sessionTileDelegate } from '@/store/session-states'
 import { notifyThreadEditOpen } from '@/store/thread-scroll'
 import { $voicePlayback } from '@/store/voice-playback'
@@ -641,6 +643,71 @@ const CompressConversationAction: FC<{ label: string }> = ({ label }) => {
   )
 }
 
+// "Move here" for a chat another device owns. The fence that refused the send is
+// correct — exactly one Hermes may write a chat — so the fix is not a retry but
+// choosing which device writes. One click claims the chat (an exact
+// compare-and-swap against the owner the refusal named) and finishes the send
+// that was refused, including its attachments, exactly once.
+//
+// Renders only when there IS a refused send held for this chat: the store is what
+// preserves the draft (the composer cleared it before dispatching), so without it
+// there is nothing to finish and the button could only move a chat silently.
+const MoveSessionHereAction: FC<{ busyLabel: string; failedLabel: string; label: string }> = ({
+  busyLabel,
+  failedLabel,
+  label
+}) => {
+  const view = useSessionView()
+  const storedId = useStore(view.$storedId)
+  const pending = useStore($pendingSessionMoves)
+  const [moving, setMoving] = useState(false)
+
+  // A chat another device owns refuses every send, so several may be waiting. The
+  // button appears only when one of them can actually be moved — an owner block that
+  // names another chat, or predates fencing, can only produce a failed claim.
+  // `pending` is read so this re-renders when the queue changes.
+  const movable = pending && canMoveSessionHere(storedId)
+
+  const move = useCallback(async () => {
+    if (!storedId) {
+      return
+    }
+
+    triggerHaptic('submit')
+    setMoving(true)
+
+    try {
+      const result = await moveSessionHere(storedId)
+      const notificationId = `session-move:${storedId}`
+
+      if (!result.ok) {
+        // The draft and its attachments are still held, so the user can wait
+        // for the other device and click again — never a silent new chat.
+        notifyError(
+          new Error(result.message || result.reason || 'move failed'),
+          result.reason === 'SESSION_HANDOFF_BUSY' ? busyLabel : failedLabel,
+          { id: notificationId }
+        )
+      } else {
+        dismissNotification(notificationId)
+      }
+    } finally {
+      setMoving(false)
+    }
+  }, [busyLabel, failedLabel, storedId])
+
+  if (!movable) {
+    return null
+  }
+
+  return (
+    <button className="aui-error-action" disabled={moving} onClick={() => void move()} type="button">
+      {moving ? <Loader2Icon className="size-3 animate-spin" /> : <ArrowRightLeft className="size-3" />}
+      {label}
+    </button>
+  )
+}
+
 const ErrorRecoveryActions: FC = () => {
   const { t } = useI18n()
   const copy = t.assistant.thread
@@ -750,6 +817,13 @@ const ErrorRecoveryActions: FC = () => {
         <button className="aui-error-action" onClick={chooseModel} type="button">
           {copy.errorChooseModel}
         </button>
+      )}
+      {plan.moveHere && (
+        <MoveSessionHereAction
+          busyLabel={copy.errorMoveSessionBusy}
+          failedLabel={copy.errorMoveSessionFailed}
+          label={copy.errorMoveSessionHere}
+        />
       )}
       {plan.startNewSession && (
         <button className="aui-error-action" onClick={startNewSession} type="button">

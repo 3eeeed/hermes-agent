@@ -94,6 +94,14 @@ test('session storage write failure is treated as disk-full class', () => {
   expect(lastMessage()).toMatch(/Disk full/i)
 })
 
+test('notifyError can replace a scoped recovery error instead of stacking retries', () => {
+  notifyError(new Error('first failure'), 'Move failed', { id: 'session-move:chat-1' })
+  notifyError(new Error('second failure'), 'Move failed', { id: 'session-move:chat-1' })
+
+  expect($notifications.get()).toHaveLength(1)
+  expect($notifications.get()[0]).toMatchObject({ id: 'session-move:chat-1', message: 'second failure' })
+})
+
 test('code-skew 503 unwraps to a restart-required summary, not raw IPC JSON', () => {
   notifyError(
     new Error(

@@ -22,12 +22,14 @@ export interface GatewayEventDeps {
     failure?: { error: string; partial: boolean },
     occurredAt?: number
   ) => void
+  /** Returns the id of the row that ended up carrying the failure — the live assistant
+   *  bubble it sealed, or the one it minted. */
   failAssistantMessage: (
     sessionId: string,
     errorMessage: string,
     occurredAt?: number,
     surface?: ErrorSurface | null
-  ) => void
+  ) => string | undefined
   flushQueuedDeltas: (sessionId?: string) => void
   finalizeInterimAssistantMessage: (sessionId: string, text: string, occurredAt?: number) => void
   hydrateFromStoredSession: (

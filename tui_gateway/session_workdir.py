@@ -342,13 +342,21 @@ def _persist_branch_seed(session: dict) -> None:
             _workdir_reraise_disk_full(exc, "branch seed persist failed")
 
 
-def _persist_submit_user_row(session: dict, text: Any, display_kind: str | None) -> None:
+def _persist_submit_user_row(
+    session: dict, text: Any, display_kind: str | None, adopt_row_id: int | None = None,
+    *, send_id: str | None = None, reservation_holder: str | None = None,
+    stage_key: str = "_submit_user_row") -> None:
     """Write the submitted user turn at send time, before the agent build and turn: the agent's own
     crash persist only runs once the build finished, so quitting a frozen app during a slow first build
     left a session row with no message (#111868). The dict is staged on the session already stamped
     durable (the shape ``quiet_single_query`` re-stages an unanswered DM in) so the turn adopts it via
     ``_stage_turn_user_message`` and the flush writes no second row. A failed write stages nothing:
-    the turn's crash persist then writes the row as before."""
+    the turn's crash persist then writes the row as before.
+
+    ``adopt_row_id`` is the row an EARLIER attempt at this exact send already wrote, recovered from the
+    durable send ledger: the message is in the transcript once, this attempt only has to run the turn
+    it never got. A row that is no longer there (a rewind cut it away between the attempts) is not
+    adopted — the send falls back to writing its own, which is the pre-ledger behaviour."""
     key = session.get("session_key")
     if not key or not isinstance(text, str) or not text.strip():
         return
@@ -361,13 +369,23 @@ def _persist_submit_user_row(session: dict, text: Any, display_kind: str | None)
         if db is None:
             return
         try:
-            staged["_row_id"] = db.append_message(
-                key, "user", content=text, display_kind=display_kind, timestamp=staged["timestamp"])
+            adopted = (
+                adopt_row_id is not None and db.get_message_role(key, adopt_row_id) == "user")
+            if adopted:
+                staged["_row_id"] = adopt_row_id
+            elif send_id and reservation_holder:
+                staged["_row_id"] = db.append_prompt_send_user_message(
+                    key, send_id=send_id, holder=reservation_holder, content=text,
+                    display_kind=display_kind, timestamp=staged["timestamp"])
+            else:
+                staged["_row_id"] = db.append_message(
+                    key, "user", content=text, display_kind=display_kind,
+                    timestamp=staged["timestamp"])
         except Exception as exc:
             _workdir_reraise_disk_full(exc, "submit-time user row persist failed")
             return
     staged[_DB_PERSISTED_MARKER] = True
-    session["_submit_user_row"] = staged
+    session[stage_key] = staged
 
 
 def _adopt_submit_user_row(session: dict, agent, persist_user_message: Any, text: Any) -> None:

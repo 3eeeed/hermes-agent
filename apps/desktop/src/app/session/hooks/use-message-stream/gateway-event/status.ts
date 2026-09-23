@@ -3,7 +3,7 @@ import { translateNow, TRANSLATIONS } from '@/i18n'
 import { getRuntimeI18nLocale } from '@/i18n/runtime'
 import { textPart } from '@/lib/chat-messages'
 import { coerceGatewayText } from '@/lib/chat-runtime'
-import type { ErrorSurface } from '@/lib/error-surface'
+import { type ErrorSurface, parseErrorSurface } from '@/lib/error-surface'
 import { errorCardText } from '@/lib/error-surface-copy'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import { type AgentNoticePayload, clearAgentNotice, nativeNoticeInput, showAgentNotice } from '@/store/agent-notices'
@@ -17,6 +17,12 @@ import { requestDesktopOnboarding } from '@/store/onboarding'
 import { flashPetActivity, setPetActivity } from '@/store/pet'
 import { clearAllPrompts } from '@/store/prompts'
 import { setTurnStartedAt } from '@/store/session'
+import {
+  armRefusedSendFromTurn,
+  completeInFlightSend,
+  noteSessionMoveErrorMessage,
+  type PendingSessionMove
+} from '@/store/session-move'
 import { clearActiveSessionTodos } from '@/store/todos'
 
 import type { GatewayEventContext } from './types'
@@ -180,11 +186,33 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
     // as a classified turn: a live-owner refusal (SESSION_NOT_OWNED, #106217)
     // is deterministic — Retry hits the same wall, only a new chat helps —
     // and disk-full is a machine problem, not a provider one.
-    const surface: ErrorSurface | null = isSessionNotOwnedError(new Error(errorMessage))
-      ? { code: 'SESSION_NOT_OWNED', layer: 'gateway', retryable: false }
-      : isDiskFullErrorMessage(errorMessage)
-        ? { code: 'disk_full', layer: 'disk', retryable: false }
-        : null
+    // A backend that stamps the refusal itself is believed over the text: only the wire
+    // block carries the live owner's compare-and-swap precondition, which is what lets
+    // the card offer the move rather than only "start a new chat".
+    const surface: ErrorSurface | null =
+      parseErrorSurface(payload?.error_surface) ??
+      (isSessionNotOwnedError(new Error(errorMessage))
+        ? { code: 'SESSION_NOT_OWNED', layer: 'gateway', retryable: false }
+        : isDiskFullErrorMessage(errorMessage)
+          ? { code: 'disk_full', layer: 'disk', retryable: false }
+          : null)
+
+    // The fence refused this turn AFTER accepting its submit, so the send never reached
+    // the chat and exists only in the pipeline's in-flight slot. Promote it to a movable
+    // attempt — keyed by the stored chat it targeted — so the card can finish it with the
+    // exact text and attachments instead of stranding the user's message.
+    let armedMove: null | PendingSessionMove = null
+
+    if (sessionId) {
+      if (surface?.code === 'SESSION_NOT_OWNED') {
+        armedMove = armRefusedSendFromTurn(sessionId, surface.ownership ?? null)
+      } else {
+        // Retire only the terminal turn's oldest hold. A later queued send may
+        // already be waiting on the same runtime and still needs its own refusal
+        // envelope.
+        completeInFlightSend(sessionId)
+      }
+    }
 
     // When a code was recovered, the glossed card sentence explains it better
     // than the raw refusal. When none was, the server's own text IS the plain
@@ -243,7 +271,15 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
 
     if (sessionId) {
       flushQueuedDeltas(sessionId)
-      failAssistantMessage(sessionId, errorMessage, occurredAt, surface)
+
+      const errorMessageId = failAssistantMessage(sessionId, errorMessage, occurredAt, surface)
+
+      // Bind the card just painted to the attempt armed above. The move that finishes
+      // the send then removes THAT row and leaves any older ownership card — still the
+      // only way to send the message it is holding — exactly where it is.
+      if (armedMove && errorMessageId) {
+        noteSessionMoveErrorMessage(armedMove.storedSessionId, armedMove.attemptId, errorMessageId)
+      }
     }
 
     if (isActiveEvent) {

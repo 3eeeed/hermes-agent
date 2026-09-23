@@ -273,7 +273,7 @@ def test_prompt_submit_dispatches_to_compute_host_when_turn_isolation_enabled(mo
     server._sessions["iso-sid"] = _session(history=list(seed_history))
     server._sessions["iso-sid"]["agent"] = None
     server._sessions["iso-sid"]["agent_ready"] = threading.Event()
-    parent_writes = {"ensure_session": 0, "persist_seed": 0}
+    parent_writes = {"ensure_session": 0, "persist_seed": 0, "user_row": 0}
     monkeypatch.setattr(
         server,
         "_load_cfg",
@@ -293,6 +293,13 @@ def test_prompt_submit_dispatches_to_compute_host_when_turn_isolation_enabled(mo
             "persist_seed", parent_writes["persist_seed"] + 1
         ),
     )
+
+    def persist_user_row(session, text, display_kind, **_kwargs):
+        parent_writes["user_row"] += 1
+        session["_submit_user_row"] = {
+            "role": "user", "content": text, "_row_id": 77, "_db_persisted": True}
+
+    monkeypatch.setattr(server, "_persist_submit_user_row", persist_user_row)
     monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: fake_supervisor)
 
     try:
@@ -309,7 +316,8 @@ def test_prompt_submit_dispatches_to_compute_host_when_turn_isolation_enabled(mo
         assert fake_supervisor.frames[0]["text"] == "hello"
         assert fake_supervisor.frames[0]["history"] == seed_history
         assert server._sessions["iso-sid"]["history"] == seed_history
-        assert parent_writes == {"ensure_session": 0, "persist_seed": 0}
+        assert parent_writes == {"ensure_session": 1, "persist_seed": 1, "user_row": 1}
+        assert fake_supervisor.frames[0]["submit_user_row"]["_row_id"] == 77
         assert server._sessions["iso-sid"]["running"] is True
 
         fake_supervisor.callback(
@@ -13814,6 +13822,13 @@ def test_prompt_submit_row_id_accepts_full_lineage_ordinal(monkeypatch):
         assert resp.get("error") is None, f"got error: {resp.get('error')}"
         assert sess["history"] == tip_history[:2]
     finally:
+        # Let the first turn UNWIND before reusing its session_key. Its thread
+        # crosses the ownership gate itself (_admit_prompt_turn re-claims when the
+        # record has no lease), so releasing under a live turn hands the key back
+        # to that thread and fences the second session out with 4090 instead of
+        # the ordinal mismatch this test is about.
+        if (run_thread := sess.get("_run_thread")) is not None:
+            run_thread.join(timeout=5)
         # Release the slot the first turn claimed, as _finalize_session does in
         # production. Popping alone leaks the lease, and the second session below
         # uses the same session_key -- so without this the test fences itself out
@@ -22395,6 +22410,7 @@ def test_prompt_submit_consecutive_rewinds_with_returned_survivor_row_ids(
     )
     monkeypatch.setattr(server, "_start_agent_build", lambda *a, **k: None)
     monkeypatch.setattr(server, "_start_inflight_turn", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_run_after_agent_ready", lambda *a, **k: None)
 
     try:
         # Rewind 1: cut before "third" (last user turn). Survivors: turns
@@ -22433,6 +22449,10 @@ def test_prompt_submit_consecutive_rewinds_with_returned_survivor_row_ids(
         }
         assert "999999" not in row_id_map
         sess["running"] = False
+        # This test stubs the worker/compute callback, so simulate its terminal
+        # release as well as the running flag. A new immutable turn token must not
+        # overwrite a still-busy previous occurrence.
+        server._finish_session_turn(sid, sess)
 
         # Rewind 2a: the STALE pre-rewind id for "second" must fail closed.
         stale_resp = server.handle_request(

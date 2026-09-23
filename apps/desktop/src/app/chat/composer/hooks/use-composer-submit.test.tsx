@@ -6,6 +6,7 @@ import { PaneVisibleContext } from '@/components/pane-shell/pane-visibility'
 import { $clarifyRequests } from '@/store/clarify'
 import type { ComposerAttachment } from '@/store/composer'
 import { clearQueuedPrompts, getQueuedPrompts } from '@/store/composer-queue'
+import { $pendingSessionMoves, announceSessionMoveSendAccepted, rememberRefusedSend } from '@/store/session-move'
 import {
   clearAllPrompts,
   hasBlockingPromptRequest,
@@ -57,7 +58,10 @@ function renderSubmitHook({
   const onSteer = vi.fn(async () => true)
   const onSteerHidden = vi.fn(async () => true)
   const onSubmit = vi.fn(async () => true)
-  const loadIntoComposer = vi.fn()
+  const loadIntoComposer = vi.fn((nextText: string) => {
+    draftRef.current = nextText
+    editorRef.current!.textContent = nextText
+  })
   const stashAt = vi.fn()
   const queueCurrentDraft = vi.fn(() => true)
   let updatePaneVisible: Dispatch<SetStateAction<boolean>> | undefined
@@ -127,6 +131,8 @@ function renderSubmitHook({
 
   return {
     clearDraft,
+    draftRef,
+    editorRef,
     hook,
     onCancel,
     onSteer,
@@ -453,6 +459,140 @@ describe('useComposerSubmit busy-turn routing', () => {
     await waitFor(() =>
       expect(onSubmit).toHaveBeenCalledWith('hello', expect.objectContaining({ composerScope: 'stored-session' }))
     )
+  })
+})
+
+describe('useComposerSubmit Move here cleanup', () => {
+  const refuse = (attemptId: string, text: string, storedSessionId = 'stored-session') => {
+    rememberRefusedSend({
+      attachments: [],
+      attemptId,
+      ownership: null,
+      runtimeId: 'runtime-session',
+      storedSessionId,
+      text
+    })
+  }
+
+  afterEach(() => {
+    cleanup()
+    $pendingSessionMoves.set({})
+    vi.restoreAllMocks()
+  })
+
+  it('clears the exact draft restored for a refused send after its Move here replay lands', async () => {
+    const harness = renderSubmitHook({ sessionKey: 'stored-session', text: 'move this message' })
+
+    harness.onSubmit.mockImplementation(async () => {
+      refuse('attempt-1', 'move this message')
+
+      return false
+    })
+
+    act(() => harness.hook.result.current.submitDraft())
+    await waitFor(() => expect(harness.loadIntoComposer).toHaveBeenCalledWith('move this message', []))
+
+    act(() =>
+      announceSessionMoveSendAccepted({
+        attemptId: 'attempt-1',
+        storedSessionId: 'stored-session',
+        text: 'move this message'
+      })
+    )
+
+    expect(harness.draftRef.current).toBe('')
+    expect(harness.editorRef.current?.textContent).toBe('')
+  })
+
+  it('preserves a newer draft even when the user edits it back to the same text', async () => {
+    const harness = renderSubmitHook({ sessionKey: 'stored-session', text: 'same words' })
+
+    harness.onSubmit.mockImplementation(async () => {
+      refuse('attempt-1', 'same words')
+
+      return false
+    })
+
+    act(() => harness.hook.result.current.submitDraft())
+    await waitFor(() => expect(harness.loadIntoComposer).toHaveBeenCalledWith('same words', []))
+
+    act(() => {
+      harness.editorRef.current!.textContent = 'new words'
+      harness.editorRef.current!.dispatchEvent(new InputEvent('input', { bubbles: true }))
+      harness.draftRef.current = 'new words'
+      harness.editorRef.current!.textContent = 'same words'
+      harness.editorRef.current!.dispatchEvent(new InputEvent('input', { bubbles: true }))
+      harness.draftRef.current = 'same words'
+    })
+
+    act(() =>
+      announceSessionMoveSendAccepted({
+        attemptId: 'attempt-1',
+        storedSessionId: 'stored-session',
+        text: 'same words'
+      })
+    )
+
+    expect(harness.draftRef.current).toBe('same words')
+    expect(harness.editorRef.current?.textContent).toBe('same words')
+  })
+
+  it('does not clear a restored draft when another session move lands', async () => {
+    const harness = renderSubmitHook({ sessionKey: 'stored-session', text: 'keep here' })
+
+    harness.onSubmit.mockImplementation(async () => {
+      refuse('attempt-1', 'keep here')
+
+      return false
+    })
+
+    act(() => harness.hook.result.current.submitDraft())
+    await waitFor(() => expect(harness.loadIntoComposer).toHaveBeenCalledWith('keep here', []))
+
+    act(() =>
+      announceSessionMoveSendAccepted({
+        attemptId: 'attempt-other',
+        storedSessionId: 'other-session',
+        text: 'keep here'
+      })
+    )
+
+    expect(harness.draftRef.current).toBe('keep here')
+  })
+
+  it('does not let older acceptance erase a newer refused occurrence with identical text', async () => {
+    const harness = renderSubmitHook({ sessionKey: 'stored-session', text: 'same occurrence text' })
+    let attempt = 0
+
+    harness.onSubmit.mockImplementation(async () => {
+      attempt += 1
+      refuse(`attempt-${attempt}`, 'same occurrence text')
+
+      return false
+    })
+
+    act(() => harness.hook.result.current.submitDraft())
+    await waitFor(() => expect(harness.loadIntoComposer).toHaveBeenCalledTimes(1))
+    act(() => harness.hook.result.current.submitDraft())
+    await waitFor(() => expect(harness.loadIntoComposer).toHaveBeenCalledTimes(2))
+
+    act(() =>
+      announceSessionMoveSendAccepted({
+        attemptId: 'attempt-1',
+        storedSessionId: 'stored-session',
+        text: 'same occurrence text'
+      })
+    )
+    expect(harness.draftRef.current).toBe('same occurrence text')
+
+    act(() =>
+      announceSessionMoveSendAccepted({
+        attemptId: 'attempt-2',
+        storedSessionId: 'stored-session',
+        text: 'same occurrence text'
+      })
+    )
+    expect(harness.draftRef.current).toBe('')
   })
 })
 

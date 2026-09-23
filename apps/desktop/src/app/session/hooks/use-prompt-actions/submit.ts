@@ -33,6 +33,12 @@ import {
   setMessages,
   touchSessionActivity
 } from '@/store/session'
+import {
+  forgetInFlightSend,
+  type PromptSubmitPayload,
+  rememberInFlightSend,
+  rememberRefusedSend
+} from '@/store/session-move'
 import { $sessionStates } from '@/store/session-states'
 
 import type { ClientSessionState } from '../../../types'
@@ -50,6 +56,7 @@ import {
   isSessionNotOwnedError,
   isTargetSessionBusy,
   releaseSubmitInFlight,
+  sessionOwnershipFromError,
   SessionRecoveryAborted,
   type SubmitTextOptions,
   withSessionBusyRetry,
@@ -73,7 +80,7 @@ interface SubmitPromptDeps {
     sessionId: string,
     attachments: ComposerAttachment[],
     options?: { updateComposerAttachments?: boolean }
-  ) => Promise<{ attachments: ComposerAttachment[]; sessionId: string }>
+  ) => Promise<{ attachments: ComposerAttachment[]; sessionId: string; stagedImagePaths: string[] }>
   updateSessionState: (
     sessionId: string,
     updater: (state: ClientSessionState) => ClientSessionState,
@@ -363,7 +370,10 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         }
       }
 
-      const optimisticId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      // A "Move here" replay adopts the bubble its refused attempt already painted, so
+      // the message the user is looking at is UPDATED in place. Minting a fresh id here
+      // is what put a second copy of their own text (and image) below the first.
+      const optimisticId = options?.moveOptimisticId ?? `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
       // What the bubble shows. A `/skill` send carries the whole expanded
       // skill body as its text — model-facing scaffolding — so the dispatcher
@@ -727,6 +737,16 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         seedOptimistic(sessionId)
       }
 
+      // Upgraded to the workspace-staged copies once the attach step runs, so a
+      // refusal preserves the attachments in the form the resend can reuse.
+      let preservedAttachments: ComposerAttachment[] = attachments
+      // The digest-bound params, once they exist. Null while the pipeline is still
+      // resolving the session or staging attachments — a refusal that early has no
+      // payload to replay, and the resend rebuilds as a first send would.
+      let preservedPayload: null | PromptSubmitPayload = null
+      let heldAttempt: ReturnType<typeof rememberInFlightSend> = null
+      let heldRuntimeId: null | string = sessionId
+
       try {
         // The account picker is available before the first message creates a
         // durable chat. Commit that one-shot draft choice before prompt.submit,
@@ -763,6 +783,11 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         })
 
         const syncedAttachments = attachResult.attachments
+        const stagedImagePaths = attachResult.stagedImagePaths
+
+        // Staged into the session workspace now, so a "Move here" resend does
+        // not re-upload them (see the SESSION_NOT_OWNED branch below).
+        preservedAttachments = syncedAttachments
         // Always a live string; pin it so TS narrows past the outer
         // `string | null` sessionId binding for prompt.submit.
         const liveSessionId = attachResult.sessionId
@@ -784,8 +809,14 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         rewriteOptimistic(liveSessionId)
         const text = buildContextText(syncedAttachments)
 
-        const submitParams = (targetId: string) => ({
-          session_id: targetId,
+        // Everything this submit MEANS. The gateway digests exactly these fields
+        // and binds the digest to the send id, so a "Move here" resend REPLAYS the
+        // payload its refusal was built from rather than rebuilding it: by the time
+        // the user clicks, the HUD that set `surface: 'hud'` has closed and the
+        // composer that supplied `title_preview` has been emptied, and a payload
+        // that differs by one field collides with its own id (same key, different
+        // digest → conflict) and can never be sent.
+        const payload: PromptSubmitPayload = options?.replayPayload ?? {
           text,
           ...(interrupted && { interrupted }),
           // Off-screen widget intent: the gateway types the persisted user
@@ -806,6 +837,23 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           // the live turn with text the user explicitly queued.
           ...(options?.fromQueue && { queued: true }),
           ...(titlePreview && { title_preview: titlePreview })
+        }
+
+        preservedPayload = payload
+
+        // The two keys the gateway does NOT digest, applied per attempt: the
+        // runtime target (re-minted by every reconnect, so a replay legitimately
+        // names a different one) and the retry key itself.
+        const submitParams = (targetId: string) => ({
+          ...payload,
+          // Transport-lifetime evidence, deliberately outside the immutable
+          // message digest: only images staged during THIS RPC attempt may be
+          // consumed when the durable ledger answers an accepted replay.
+          ...(stagedImagePaths.length && { staged_attachment_paths: stagedImagePaths }),
+          // A resend of a message the fence refused: same id every attempt, so an
+          // acceptance whose response was lost cannot become a second turn.
+          ...(options?.clientSendId && { client_send_id: options.clientSendId }),
+          session_id: targetId
         })
 
         // On sleep/wake the gateway's in-memory session may have been cleared
@@ -818,6 +866,33 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         try {
           const recoverStoredSessionId = targetStoredSessionId ?? selectedStoredSessionIdRef.current
 
+          // Hold this send against a refusal that does NOT come back as this call's
+          // rejection. The gateway re-proves ownership again at turn admission, and a
+          // submit that staged an attachment first (which warms a deferred agent build)
+          // is routinely accepted here and refused there — arriving as a stream error,
+          // after the composer has already cleared the draft and the chips. Keyed by the
+          // runtime the submit addresses; re-keyed below if recovery re-mints it.
+          const heldSend = {
+            attachments: preservedAttachments,
+            displayKind: options?.displayKind,
+            displayText: options?.displayText,
+            // The row this send already owns, so an asynchronous refusal arms an attempt
+            // whose replay updates that bubble instead of painting another one.
+            optimisticMessageId: optimisticId,
+            ownership: null,
+            runtimeId: sessionId,
+            storedSessionId: targetStoredSessionId ?? '',
+            text: rawText,
+            ...(preservedPayload && { payload: preservedPayload }),
+            ...(options?.moveAttemptId && { attemptId: options.moveAttemptId }),
+            ...(options?.moveErrorMessageId && { errorMessageId: options.moveErrorMessageId }),
+            ...(options?.clientSendId && { sendId: options.clientSendId })
+          }
+
+          if (sessionId) {
+            heldAttempt = rememberInFlightSend(sessionId, heldSend)
+          }
+
           await withSessionNotFoundResume(
             sessionId,
             recoverStoredSessionId,
@@ -829,6 +904,16 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
               requestGateway,
               driftReason: sessionDriftReason,
               onRecovered: recoveredId => {
+                // The submit is about to be replayed against a freshly minted runtime, and
+                // a stream refusal will name THAT one.
+                forgetInFlightSend(heldRuntimeId, heldAttempt?.attemptId)
+                heldRuntimeId = recoveredId
+                heldAttempt = rememberInFlightSend(recoveredId, {
+                  ...heldSend,
+                  runtimeId: recoveredId,
+                  ...(heldAttempt && { attemptId: heldAttempt.attemptId, sendId: heldAttempt.sendId })
+                })
+
                 if (onRuntimeRecovered) {
                   onRuntimeRecovered(recoveredId)
                 } else {
@@ -866,12 +951,50 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           throw submitErr
         }
 
-        if (usingComposerAttachments) {
+        if (usingComposerAttachments || options?.moveAttemptId) {
           // A submit owns only the occurrences that actually reached the
           // gateway. Tokenized chips match across staging clones; legacy chips
           // match by exact object identity, so a newer same-id replacement is
           // preserved while the staged object for a submitted file is removed.
+          //
+          // A "Move here" replay carries its attachments explicitly, but it owns
+          // composer occurrences all the same: the refused dispatch put the chips
+          // BACK (use-composer-submit restores what the gateway rejected), and this
+          // send is the one that finally carried them. Without this the image the
+          // user sent stayed staged in the composer as a third copy of itself. The
+          // occurrence token is what keeps a chip they re-added since — a different
+          // occurrence of the same path — out of the removal.
           scope.removeAttachments(syncedAttachments)
+        }
+
+        // ...and the ownership card that refusal painted has now been answered. Removed
+        // by the id the attempt recorded, never by "every SESSION_NOT_OWNED card": an
+        // older message's card is still holding that message unsent, and deleting it
+        // would take the only route left to send it with it. A card that had already
+        // streamed content keeps its content and loses only the refusal.
+        if (options?.moveErrorMessageId) {
+          const staleErrorId = options.moveErrorMessageId
+
+          updateSessionState(
+            liveSessionId,
+            state => ({
+              ...state,
+              messages: state.messages.flatMap(message => {
+                if (message.id !== staleErrorId || message.errorSurface?.code !== 'SESSION_NOT_OWNED') {
+                  return [message]
+                }
+
+                if (!message.parts.length) {
+                  return []
+                }
+
+                const { error: _error, errorSurface: _errorSurface, ...kept } = message
+
+                return [kept]
+              })
+            }),
+            targetStoredSessionId
+          )
         }
 
         // Submit landed — the turn now runs (busy stays true), but the submit
@@ -881,6 +1004,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         return true
       } catch (err) {
         releaseBusy()
+        // This send failed in the open, so it is recorded below (or not at all) rather
+        // than left held for a stream refusal that belongs to some later turn.
+        forgetInFlightSend(heldRuntimeId, heldAttempt?.attemptId)
 
         // A queued drain that raced a not-yet-settled turn gets a transient
         // "session busy" (4009). Don't surface an error bubble/toast — the entry
@@ -894,31 +1020,80 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // Another surface owns the session (#106217): a deterministic gateway
         // refusal, so the error card drops Retry and offers a new session.
         const notOwned = isSessionNotOwnedError(err)
+        // ...and, when the gateway named the owner, the option that actually
+        // fixes it: move the chat to this device. The composer already cleared
+        // the draft and the attachment chips, so THIS is where the user's
+        // message survives until they decide (store/session-move.ts).
+        const ownership = notOwned ? sessionOwnershipFromError(err) : null
+
+        // The card this refusal paints is addressable, so a later "Move here" that lands
+        // can delete THIS card rather than sweeping the transcript. A replay refused
+        // AGAIN repaints the card its own attempt already owns instead of stacking a
+        // second one below it — only an ownership refusal may reuse that row, since any
+        // other failure is a different ending and the attempt still points at the card.
+        const errorMessageId = (notOwned && options?.moveErrorMessageId) || `assistant-error-${Date.now()}`
+
+        if (notOwned && targetStoredSessionId) {
+          // Identities are minted on the first refusal and reused by every retry of
+          // THIS message: the attempt id is what completion compare-and-deletes on,
+          // the send id is what makes the gateway recognise a replayed acceptance.
+          rememberRefusedSend({
+            attachments: preservedAttachments,
+            displayKind: options?.displayKind,
+            displayText: options?.displayText,
+            // The two rows this refusal leaves on screen, so the move that finishes the
+            // send updates the one and removes the other by exact id.
+            errorMessageId,
+            optimisticMessageId: optimisticId,
+            ownership,
+            runtimeId: sessionId,
+            storedSessionId: targetStoredSessionId,
+            text: rawText,
+            ...(preservedPayload && { payload: preservedPayload }),
+            // A retry that was refused AGAIN re-records under the attempt it
+            // retried, so the store updates that entry rather than queueing the
+            // user's message a second time under a fresh identity.
+            ...(options?.moveAttemptId && { attemptId: options.moveAttemptId }),
+            ...(options?.clientSendId && { sendId: options.clientSendId })
+          })
+        }
 
         updateSessionState(
           sessionId,
-          state => ({
-            ...state,
-            messages: [
-              ...state.messages,
-              {
-                id: `assistant-error-${Date.now()}`,
-                role: 'assistant',
-                parts: [],
-                error: message || copy.promptFailed,
-                ...(notOwned && { errorSurface: { layer: 'gateway', code: 'SESSION_NOT_OWNED', retryable: false } }),
-                branchGroupId: state.pendingBranchGroup ?? undefined,
-                completedAt: occurredAt,
-                timestamp: occurredAt
-              }
-            ],
-            busy: false,
-            awaitingResponse: false,
-            pendingBranchGroup: null,
-            sawAssistantPayload: true,
-            // The failed submit's clock seed dies with the turn it never got.
-            turnStartedAt: null
-          }),
+          state => {
+            const card: ChatMessage = {
+              id: errorMessageId,
+              role: 'assistant',
+              parts: [],
+              error: message || copy.promptFailed,
+              ...(notOwned && {
+                errorSurface: {
+                  layer: 'gateway',
+                  code: 'SESSION_NOT_OWNED',
+                  retryable: false,
+                  ...(ownership && { ownership })
+                }
+              }),
+              branchGroupId: state.pendingBranchGroup ?? undefined,
+              completedAt: occurredAt,
+              timestamp: occurredAt
+            }
+
+            return {
+              ...state,
+              // A replay refused again repaints the card its attempt already owns; every
+              // other refusal appends its own.
+              messages: state.messages.some(m => m.id === errorMessageId)
+                ? state.messages.map(m => (m.id === errorMessageId ? card : m))
+                : [...state.messages, card],
+              busy: false,
+              awaitingResponse: false,
+              pendingBranchGroup: null,
+              sawAssistantPayload: true,
+              // The failed submit's clock seed dies with the turn it never got.
+              turnStartedAt: null
+            }
+          },
           targetStoredSessionId
         )
 

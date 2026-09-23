@@ -7,6 +7,8 @@
 // Advisory contract: older backends never send this — every consumer must
 // keep working when it is absent (legacy string-sniffing stays as fallback).
 
+import { parseSessionOwnership, type SessionOwnership } from '@/store/session-move'
+
 export const ERROR_SURFACE_LAYERS = [
   'provider',
   'endpoint',
@@ -84,6 +86,10 @@ export interface ErrorSurface {
   /** Free-tier codes: the backend's own plain sentence for this failure (it
    *  names the wait, the model, the way forward). Shown as the card body. */
   message?: string
+  /** SESSION_NOT_OWNED only: the live owner the gateway refused us in favour
+   *  of, and the compare-and-swap precondition for moving the chat here
+   *  (`session.handoff.claim`). Absent from older backends. */
+  ownership?: SessionOwnership
 }
 
 /** Validate a wire payload into an ErrorSurface, or null when absent/garbled. */
@@ -99,6 +105,7 @@ export function parseErrorSurface(value: unknown): ErrorSurface | null {
     layer?: unknown
     message?: unknown
     model?: unknown
+    ownership?: unknown
     provider?: unknown
     provider_label?: unknown
     retryable?: unknown
@@ -119,7 +126,11 @@ export function parseErrorSurface(value: unknown): ErrorSurface | null {
     ...(raw.auth_kind === 'oauth' || raw.auth_kind === 'api_key' ? { authKind: raw.auth_kind } : {}),
     ...(typeof raw.provider_label === 'string' && raw.provider_label ? { providerLabel: raw.provider_label } : {}),
     ...(typeof raw.api_key_env === 'string' && raw.api_key_env ? { apiKeyEnv: raw.api_key_env } : {}),
-    ...(typeof raw.message === 'string' && raw.message.trim() ? { message: raw.message.trim() } : {})
+    ...(typeof raw.message === 'string' && raw.message.trim() ? { message: raw.message.trim() } : {}),
+    // A garbled block is dropped, never half-parsed: the claim it feeds is an
+    // exact compare-and-swap, so a guessed lease id or generation is worse
+    // than no offer at all.
+    ...((ownership => (ownership ? { ownership } : {}))(parseSessionOwnership(raw.ownership)))
   }
 }
 
@@ -173,6 +184,10 @@ export interface ErrorRecoveryPlan {
   compress: boolean
   /** requestFreshSession — when this session cannot continue as-is. */
   startNewSession: boolean
+  /** Move a chat another device owns to THIS one, then finish the refused send
+   *  (store/session-move.ts). Offered for SESSION_NOT_OWNED, where the fence is
+   *  correct and the only real fix is choosing which device writes. */
+  moveHere: boolean
   /** Open the preceding user message in the edit composer (safety refusal). */
   editMessage: boolean
   /** Reveal the Hermes data folder so the user can free space (disk_full). */
@@ -195,7 +210,10 @@ const SWITCH_PROVIDER_LAYERS: readonly ErrorSurfaceLayer[] = ['auth', 'billing',
 // an unchanged retry is known to reproduce it for the user (too long a
 // conversation, a blocked prompt, a chat another surface owns).
 const CODE_PLANS: Partial<Record<ErrorCodeKey, Partial<ErrorRecoveryPlan>>> = {
-  SESSION_NOT_OWNED: { retry: false, startNewSession: true },
+  // Retry only reproduces the refusal (the other device still owns the chat),
+  // so the card offers the two things that actually change the outcome: move
+  // the chat here, or leave it there and start a fresh one.
+  SESSION_NOT_OWNED: { moveHere: true, retry: false, startNewSession: true },
   content_policy_blocked: { editMessage: true, retry: false },
   context_overflow: { compress: true, retry: false, startNewSession: true },
   disk_full: { openHermesFolder: true, retry: true },
@@ -212,6 +230,7 @@ export function errorRecoveryPlan(surface: ErrorSurface | null | undefined): Err
     chooseModel: false,
     compress: false,
     editMessage: false,
+    moveHere: false,
     openHermesFolder: false,
     // Retry re-runs the failed prompt in place. Suppressed when the classifier
     // says the failure is deterministic — except for a credential rejection,
