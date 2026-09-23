@@ -1172,8 +1172,15 @@ export function useMessageStream({
 
   const failAssistantMessage = useCallback(
     (sessionId: string, errorMessage: string, occurredAt = Date.now() / 1000, surface?: ErrorSurface | null) => {
+      // Which row carries the failure — the live assistant bubble it seals, or the one
+      // minted here. Returned because a "Move here" needs to name the card an ownership
+      // refusal painted, and this is the only place that decides it.
+      let errorMessageId = ''
+
       updateSessionState(sessionId, state => {
         const streamId = state.streamId ?? `assistant-error-${Date.now()}`
+
+        errorMessageId = streamId
         const groupId = state.pendingBranchGroup ?? undefined
         const prev = state.messages
         const error = errorMessage.trim() || 'Hermes reported an error'
@@ -1247,6 +1254,8 @@ export function useMessageStream({
           turnLive: false
         }
       })
+
+      return errorMessageId
     },
     [updateSessionState]
   )

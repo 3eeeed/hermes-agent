@@ -77,6 +77,7 @@ import {
   sealAcceptedCorrection,
   type SurvivorUserRowIds
 } from './rewind'
+import { useSessionMoveWiring } from './session-move-wiring'
 import { useSlashCommand } from './slash'
 import { captureSteeringSession } from './steering-session'
 import { captureSubmissionDestination } from './submission-destination'
@@ -387,7 +388,7 @@ export function usePromptActions({
         storedSessionId?: string | null
         requestGateway?: GatewayRequest
       } = {}
-    ): Promise<{ attachments: ComposerAttachment[]; sessionId: string }> => {
+    ): Promise<{ attachments: ComposerAttachment[]; sessionId: string; stagedImagePaths: string[] }> => {
       const updateComposerAttachments = options.updateComposerAttachments ?? true
 
       // The submit's own target, never the chat on screen: a queued send drains
@@ -408,6 +409,7 @@ export function usePromptActions({
       const remote = isSessionRemote(storedSessionId ?? sessionId)
       let liveSessionId = sessionId
       const synced: ComposerAttachment[] = []
+      const stagedImagePaths: string[] = []
 
       // Published BEFORE the retried attach (see uploadComposerAttachment): the
       // stored→runtime binding is what routes the retry to the session's owner.
@@ -488,13 +490,17 @@ export function usePromptActions({
 
           synced.push(nextAttachment)
 
+          if (attachment.kind === 'image' && nextAttachment.path) {
+            stagedImagePaths.push(nextAttachment.path)
+          }
+
           continue
         }
 
         synced.push(attachment)
       }
 
-      return { attachments: synced, sessionId: liveSessionId }
+      return { attachments: synced, sessionId: liveSessionId, stagedImagePaths }
     },
     [activeSessionIdRef, requestGateway, runtimeIdByStoredSessionIdRef, selectedStoredSessionIdRef, updateSessionState]
   )
@@ -582,6 +588,8 @@ export function usePromptActions({
     syncAttachmentsForSubmit,
     updateSessionState
   })
+
+  useSessionMoveWiring(requestGateway, submitPromptText)
 
   // Queue a handoff of this session to a messaging platform and watch it to
   // a terminal state. We only write the request through the gateway; the

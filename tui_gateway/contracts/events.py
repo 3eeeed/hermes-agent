@@ -112,9 +112,10 @@ event("free_tier.challenge", FreeTierChallengePayload,
 
 
 class ErrorPayload(Payload):
-    """Every ``_emit("error", …)`` site sets exactly ``message``."""
+    """Session-level failure; ownership refusals also carry their typed move precondition."""
 
     message: str
+    error_surface: JsonValue | None = None
 
 
 event("error", ErrorPayload, doc="A session-level failure outside a turn (agent init, model switch, compression, resume).")

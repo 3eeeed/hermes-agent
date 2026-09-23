@@ -45,6 +45,14 @@ class PromptSubmitParams(SessionParams):
     confirm_empty_truncate: bool | None = None
     confirm_deep_truncate: bool | None = None  # send when the cut archives >1 user turn (enforced next release)
     rebind_survivor_row_ids: list[int] | None = None
+    # Immutable per-message id minted by the client. A repeat is answered with the acceptance
+    # already given rather than posting the message twice, so a retry after a lost response
+    # (a dropped socket around a "Move here" resend) cannot duplicate a turn.
+    client_send_id: str | None = None
+    # Transport-attempt evidence, excluded from the immutable message digest:
+    # only image copies actually staged for this request may be consumed when a
+    # durable accepted replay bypasses the ordinary submit pipeline.
+    staged_attachment_paths: list[str] | None = None
     # In-process only: injected by the hosted-room / bot-relay handlers, never accepted from a
     # client (a client dict for ``_turn_author`` answers 4124). Excluded from the rendered wire.
     hosted_task: JsonValue | None = Field(default=None, exclude=True, alias="_hosted_task")

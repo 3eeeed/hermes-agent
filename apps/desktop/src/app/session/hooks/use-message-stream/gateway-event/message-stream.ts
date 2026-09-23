@@ -17,6 +17,7 @@ import { flashPetActivity, markPetUnread, setPetActivity } from '@/store/pet'
 import { clearAllPrompts } from '@/store/prompts'
 import { providerWaitText, setSessionProviderWait } from '@/store/provider-wait'
 import { setCurrentUsage, setTurnStartedAt } from '@/store/session'
+import { completeInFlightSend } from '@/store/session-move'
 import { refreshSupportedSessionControlAfterTurn } from '@/store/session-control'
 import { $focusedStoredSessionId } from '@/store/session-focus'
 import { $sessionStates } from '@/store/session-states'
@@ -394,6 +395,12 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
     if (!sessionId) {
       return true
     }
+
+    // The turn ran: the send it started is in the chat, so the hold the submit
+    // pipeline kept against an ownership refusal is retired here. Left in place it
+    // would be promoted by some LATER turn's refusal and offer to "finish" a message
+    // the chat already has.
+    completeInFlightSend(sessionId)
 
     // Turn ended — drop any blocking prompt still open for THIS session
     // (e.g. interrupted, or the approval already resolved). Scoped to the

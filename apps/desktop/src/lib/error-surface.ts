@@ -7,6 +7,8 @@
 // Advisory contract: older backends never send this — every consumer must
 // keep working when it is absent (legacy string-sniffing stays as fallback).
 
+import { parseSessionOwnership, type SessionOwnership } from '@/store/session-move'
+
 export const ERROR_SURFACE_LAYERS = [
   'provider',
   'endpoint',
@@ -120,6 +122,10 @@ export interface ErrorSurface {
    *  limit (best first) and the credits option — the card's one-click buttons
    *  (agent/plan_limits.py). Absent on older backends. */
   usageLimit?: UsageLimitSurface
+  /** SESSION_NOT_OWNED only: the live owner the gateway refused us in favour
+   *  of, and the compare-and-swap precondition for moving the chat here
+   *  (`session.handoff.claim`). Absent from older backends. */
+  ownership?: SessionOwnership
 }
 
 export interface UsageLimitSuggestion {
@@ -181,6 +187,7 @@ export function parseErrorSurface(value: unknown): ErrorSurface | null {
     layer?: unknown
     message?: unknown
     model?: unknown
+    ownership?: unknown
     provider?: unknown
     provider_label?: unknown
     resets_at?: unknown
@@ -209,7 +216,11 @@ export function parseErrorSurface(value: unknown): ErrorSurface | null {
     ...(typeof raw.resets_at === 'number' && Number.isFinite(raw.resets_at) && raw.resets_at > 0
       ? { resetsAt: raw.resets_at }
       : {}),
-    ...(usageLimit ? { usageLimit } : {})
+    ...(usageLimit ? { usageLimit } : {}),
+    // A garbled block is dropped, never half-parsed: the claim it feeds is an
+    // exact compare-and-swap, so a guessed lease id or generation is worse
+    // than no offer at all.
+    ...((ownership => (ownership ? { ownership } : {}))(parseSessionOwnership(raw.ownership)))
   }
 }
 
@@ -350,6 +361,7 @@ export type ErrorActionId =
   | 'choose_model'
   | 'compress'
   | 'start_new_session'
+  | 'move_here'
   | 'edit_message'
   | 'open_hermes_folder'
   | 'continue'
@@ -394,7 +406,11 @@ const CODE_ACTIONS: Partial<Record<ErrorCodeKey, ErrorCardActions>> = {
   model_not_found: { primary: 'choose_model' },
   payload_too_large: { primary: 'compress', secondary: 'start_new_session' },
   provider_policy_blocked: { primary: 'open_provider_settings', secondary: 'choose_model' },
-  SESSION_NOT_OWNED: { primary: 'start_new_session' },
+  // Retry only reproduces the refusal (the other device still owns the chat), so the card offers
+  // the two things that change the outcome: move the chat here (store/session-move.ts finishes the
+  // refused send), or leave it there and start a fresh one. Without a preserved send to finish the
+  // card falls back to Start new session (assistant-message.tsx).
+  SESSION_NOT_OWNED: { primary: 'move_here', secondary: 'start_new_session' },
   ssl_cert_verification: { primary: 'open_setup_guide_tls' },
   truncated: { primary: 'continue' },
   upstream_blocked: { primary: 'switch_provider' },

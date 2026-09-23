@@ -715,6 +715,34 @@ CREATE TABLE IF NOT EXISTS session_turn_leases (
     expires_at REAL NOT NULL
 );
 
+-- Exactly-once prompt.submit: one row per (stored session, client send id).
+-- A submit posts the user's message, can cut history and starts a turn, none of
+-- which can be taken back — so "have I already accepted this send?" is decided
+-- here, atomically, BEFORE any of it, and in a place a SECOND gateway process can
+-- see (two Desktops on two machines drive one profile through two serve
+-- processes, so a process-local dict cannot answer the question at all).
+-- ``payload_digest`` binds the id to the message: the same id carrying different
+-- words fails closed instead of replaying the wrong acceptance. ``holder`` names
+-- the reserving backend as ``...:pid=<n>`` so a reservation whose process is
+-- provably gone can be reclaimed, exactly like session_turn_leases.
+-- No FK on session_key on purpose: the reservation is taken before
+-- _ensure_session_db_row() lazily writes the sessions row for a brand-new chat.
+-- Bounded by prune_prompt_send_ledger() on age AND count together — a count-only
+-- bound would let a chatty session evict an id a pending "Move here" can still retry.
+CREATE TABLE IF NOT EXISTS prompt_send_ledger (
+    session_key TEXT NOT NULL,
+    client_send_id TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    state TEXT NOT NULL,
+    holder TEXT NOT NULL DEFAULT '',
+    user_row_id INTEGER,
+    result_json TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    expires_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (session_key, client_send_id)
+);
+
 CREATE TABLE IF NOT EXISTS async_delegations (
     delegation_id TEXT PRIMARY KEY,
     origin_session TEXT NOT NULL,
@@ -763,6 +791,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_assistant_calls_by_session
     WHERE role = 'assistant' AND tool_calls IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(expires_at);
 CREATE INDEX IF NOT EXISTS idx_session_turn_leases_expires ON session_turn_leases(expires_at);
+CREATE INDEX IF NOT EXISTS idx_prompt_send_ledger_recency
+    ON prompt_send_ledger(session_key, updated_at);
 CREATE INDEX IF NOT EXISTS idx_session_model_usage_session ON session_model_usage(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_model_usage_model ON session_model_usage(model);
 CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery

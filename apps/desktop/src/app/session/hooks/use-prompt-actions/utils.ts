@@ -8,6 +8,7 @@ import { type CommandsCatalogLike, filterDesktopCommandsCatalog } from '@/lib/de
 import type { ErrorSurface } from '@/lib/error-surface'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import type { ComposerAttachment } from '@/store/composer'
+import { parseSessionOwnership, type PromptSubmitPayload, type SessionOwnership } from '@/store/session-move'
 
 import { registerRecoveredRuntime, singleFlightSessionResume, takeRecoveredRuntime } from './single-flight-resume'
 import type { SubmissionDestination } from './submission-destination'
@@ -381,6 +382,16 @@ export function isForwardedReceipt(
  * turn will complete that send either. */
 export function isVoiceStoppedReceipt(result: { voice_stopped?: boolean } | undefined): boolean {
   return result?.voice_stopped === true
+}
+
+// The live owner an ownership refusal named, when it named one. This is the
+// compare-and-swap precondition for `session.handoff.claim` — the only safe way
+// to move the chat here — so it is parsed exactly or not at all. Older backends
+// send no `ownership` block; the move is simply not offered for those.
+export function sessionOwnershipFromError(error: unknown): null | SessionOwnership {
+  const data = error instanceof JsonRpcGatewayError ? (error.data as { ownership?: unknown } | undefined) : undefined
+
+  return parseSessionOwnership(data?.ownership)
 }
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
@@ -802,6 +813,30 @@ export interface SubmitTextOptions {
   /** Stable caller-owned identity; retain across uncertain admission retries. */
   submission_id?: string
   attachments?: ComposerAttachment[]
+  /** Immutable per-message id forwarded to the gateway as `client_send_id`. A retry
+   *  carrying the same id is answered with the acceptance already given instead of
+   *  posting the message twice — what makes a "Move here" resend safe across a lost
+   *  response. Omitted for ordinary sends, which have nothing to retry. */
+  clientSendId?: string
+  /** The refused attempt this submit is a retry of (`PendingSessionMove.attemptId`).
+   *  A retry that is refused AGAIN re-records under this id, updating that attempt
+   *  in place; without it the store mints a fresh identity and the same message is
+   *  queued twice. Omitted for ordinary sends, which are not retries of anything. */
+  moveAttemptId?: string
+  /** The optimistic transcript row the refused attempt already painted
+   *  (`PendingSessionMove.optimisticMessageId`). The replay seeds under THIS id, so the
+   *  user's message is updated where it already is instead of appended a second time
+   *  next to the bubble the refusal left on screen. */
+  moveOptimisticId?: string
+  /** The ownership error card the refused attempt painted
+   *  (`PendingSessionMove.errorMessageId`). A landed replay removes exactly that row; a
+   *  replay refused AGAIN repaints it rather than stacking a second card. */
+  moveErrorMessageId?: string
+  /** Replay the EXACT params a refused send was built from instead of rebuilding
+   *  them. The gateway binds `clientSendId` to a digest of these, so a rebuild —
+   *  taken after the HUD closed and the composer emptied — is a different message
+   *  under the same key and is refused outright. See PromptSubmitPayload. */
+  replayPayload?: PromptSubmitPayload
   /** The composer scope key that was actually loaded when this text was
    *  submitted (see use-composer-draft's activeQueueSessionKeyRef). Compared
    *  against the resolved submit target in sessionContextDrift — a mismatch

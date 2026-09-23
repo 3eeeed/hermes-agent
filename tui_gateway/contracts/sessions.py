@@ -400,6 +400,33 @@ method("session.close", params=SessionCloseParams, result=SessionCloseResult,
        doc="Tear down a live session (its stored row stays resumable).")
 
 
+# ── session.handoff.claim ─────────────────────────────────────────────────────────────────────
+
+
+class SessionHandoffClaimParams(SessionParams):
+    """The claimant echoes the owner it OBSERVED (from a ``4090`` refusal's ``ownership`` block),
+    so the transfer is an exact compare-and-swap: a replayed or superseded observation cannot
+    move the lease. ``session_id`` is this device's live runtime id for the chat."""
+
+    expected_lease_id: str
+    expected_generation: int
+
+
+class SessionHandoffClaimResult(Result):
+    """``claimed`` = the lease moved and the previous runtime is fenced; ``already_owner`` = this
+    runtime held it (a double-clicked "Move here"). ``generation`` is the new fencing generation."""
+
+    status: str
+    session_id: str
+    stored_session_id: str
+    generation: int
+
+
+method("session.handoff.claim", params=SessionHandoffClaimParams, result=SessionHandoffClaimResult,
+       doc="Explicitly move a chat's write lease to this device (user-invoked; refuses a busy or "
+           "changed owner with 4090 + a machine-readable reason).")
+
+
 class SessionBranchParams(SessionParams):
     name: str | None = None
     count: int | None = None  # keep only the first N rows of the source history

@@ -41,6 +41,7 @@ import {
   setMessages,
   touchSessionActivity
 } from '@/store/session'
+import type { PromptSubmitPayload } from '@/store/session-move'
 import { profileScopeForSessionOwner } from '@/store/session-request-router'
 import { $sessionStates, $sessionTiles } from '@/store/session-states'
 import type { SessionInfo } from '@/types/hermes'
@@ -52,6 +53,12 @@ import type { CreateBackendSessionForSend } from '../use-session-actions/create-
 import { resolveSessionOwner, resolveSessionProfile } from '../use-session-actions/utils'
 
 import {
+  answerMoveErrorCard,
+  attemptSubmitParams,
+  replayablePayload,
+  withRefusalCard
+} from './ownership-refusal'
+import {
   adoptPreparedSubmission,
   type PreparedSubmission,
   preparedSubmissionKey,
@@ -61,6 +68,8 @@ import {
 } from './prepared-submissions'
 import { registerRecoveredRuntime, singleFlightSessionResume, takeRecoveredRuntime } from './single-flight-resume'
 import { captureSubmissionDestination, destinationAfterCreate, sameAuthorityPublishedOwner } from './submission-destination'
+import { createSubmitHold, optimisticMessageId } from './submit-hold'
+import { bindOptimisticRowId, isReceiptRowId, settleNonStartingReceipt } from './submit-receipt'
 import {
   acquireSubmitInFlight,
   type GatewayRequest,
@@ -71,7 +80,6 @@ import {
   isSessionBusyError,
   isTargetSessionBusy,
   isVoiceStoppedReceipt,
-  ownershipErrorSurface,
   refusalDroppedImages,
   releaseSubmitInFlight,
   SessionRecoveryAborted,
@@ -97,7 +105,7 @@ interface SubmitPromptDeps {
     sessionId: string,
     attachments: ComposerAttachment[],
     options?: { updateComposerAttachments?: boolean; storedSessionId?: string | null; requestGateway?: GatewayRequest }
-  ) => Promise<{ attachments: ComposerAttachment[]; sessionId: string }>
+  ) => Promise<{ attachments: ComposerAttachment[]; sessionId: string; stagedImagePaths?: string[] }>
   updateSessionState: (
     sessionId: string,
     updater: (state: ClientSessionState) => ClientSessionState,
@@ -202,6 +210,35 @@ type SubmitReceipt = Pick<PromptSubmitResult, 'forwarded' | 'user_row_id'> & {
   status?: string
   /** TUI-26: the owner ended the session's voice chat on a typed stop phrase and admitted nothing. */
   voice_stopped?: boolean
+}
+
+/**
+ * The account picker is available before the first message creates a durable chat. Commit that
+ * one-shot draft choice before prompt.submit, so the turn runner reads it while choosing its
+ * credential. Do not silently fall back to another account if this persistence fails.
+ *
+ * Both pooled providers are committed: a chat can carry a pending pick for each, and dropping
+ * Anthropic's here would silently run the first turn on a different Claude account than the one
+ * the menu shows.
+ */
+async function commitDraftCredentialSelections(targetStoredSessionId: null | string | undefined): Promise<void> {
+  for (const [provider, draft] of [
+    ['openai-codex', consumeDraftCodexCredentialSelection()],
+    ['anthropic', consumeDraftAnthropicCredentialSelection()]
+  ] as const) {
+    if (draft && targetStoredSessionId) {
+      const selected = await setPoolSessionCredentialSelection(
+        provider,
+        targetStoredSessionId,
+        draft.credentialId,
+        draft.profile
+      )
+
+      if (selected.credential_id !== draft.credentialId) {
+        throw new Error('Account selection could not be saved for this chat.')
+      }
+    }
+  }
 }
 
 /** A refusal the backend issued before admitting anything, so an identityless retry cannot duplicate a turn. */
@@ -578,7 +615,8 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         }
       }
 
-      const optimisticId = `user-${submissionId}`
+      // A "Move here" replay updates the bubble its refused attempt painted (ownership-refusal.ts).
+      const optimisticId = optimisticMessageId(options, submissionId)
 
       // What the bubble shows. A `/skill` send carries the whole expanded
       // skill body as its text — model-facing scaffolding — so the dispatcher
@@ -1035,32 +1073,11 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         requestGateway = destination.requestGateway
       }
 
-      try {
-        // The account picker is available before the first message creates a
-        // durable chat. Commit that one-shot draft choice before prompt.submit,
-        // so the turn runner reads it while choosing its credential. Do not
-        // silently fall back to another account if this persistence fails.
-        //
-        // Both pooled providers are committed: a chat can carry a pending pick
-        // for each, and dropping Anthropic's here would silently run the first
-        // turn on a different Claude account than the one the menu shows.
-        for (const [provider, draft] of [
-          ['openai-codex', consumeDraftCodexCredentialSelection()],
-          ['anthropic', consumeDraftAnthropicCredentialSelection()]
-        ] as const) {
-          if (draft && targetStoredSessionId) {
-            const selected = await setPoolSessionCredentialSelection(
-              provider,
-              targetStoredSessionId,
-              draft.credentialId,
-              draft.profile
-            )
+      // What a refusal preserves for "Move here" (submit-hold.ts).
+      const hold = createSubmitHold({ attachments, optimisticMessageId: optimisticId, options, text: rawText }, sessionId)
 
-            if (selected.credential_id !== draft.credentialId) {
-              throw new Error('Account selection could not be saved for this chat.')
-            }
-          }
-        }
+      try {
+        await commitDraftCredentialSelections(targetStoredSessionId)
 
         // Attach runs BEFORE prompt.submit, so a stale runtime id fails there
         // first and submit's own recovery never runs — that asymmetry is why
@@ -1075,6 +1092,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             })
 
         const syncedAttachments = attachResult.attachments
+        hold.send.attachments = syncedAttachments
         // Always a live string; pin it so TS narrows past the outer
         // `string | null` sessionId binding for prompt.submit.
         const liveSessionId = attachResult.sessionId
@@ -1109,8 +1127,8 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           .filter(attachment => attachment.kind === 'image' && attachment.mime)
           .map(attachment => ({ path: attachment.path!, mime: attachment.mime! }))
 
-        const submitParams = (targetId: string) => ({
-          session_id: targetId,
+        // Everything this submit MEANS (nested so its optional fields stay out of this unit).
+        const freshPayload = (): PromptSubmitPayload => ({
           text,
           submission_id: submissionId,
           ...(imageAttachments.length && { attachments: imageAttachments }),
@@ -1135,6 +1153,13 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           ...((options?.fromQueue || queueAdmission) && { queued: true }),
           ...(titlePreview && { title_preview: titlePreview })
         })
+
+        const payload = replayablePayload(options?.replayPayload, submissionId, freshPayload)
+
+        hold.send.payload = payload
+
+        const submitParams = (targetId: string) =>
+          attemptSubmitParams(payload, targetId, attachResult.stagedImagePaths, options?.clientSendId)
 
         const prepared: NonNullable<typeof retained> = retained ?? {
           id: submissionId,
@@ -1170,6 +1195,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         try {
           // A bot's chat is a tile scoped to the `bots` workspace; the primary chat is Sessions mode.
           noteMessageSent($sessionTiles.get().find(tile => tile.runtimeId === sessionId)?.workspaceMode ?? 'sessions')
+
+          // Held against a refusal that arrives later as a stream error (ownership-refusal.ts).
+          hold.hold(sessionId, targetStoredSessionId)
 
           const { result, sessionId: receiptSessionId } = await withSessionNotFoundResume<SubmitReceipt>(
             sessionId,
@@ -1221,6 +1249,8 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
               requestGateway,
               driftReason: sessionDriftReason,
               onRecovered: recoveredId => {
+                hold.rekey(recoveredId)
+
                 if (onRuntimeRecovered) {
                   onRuntimeRecovered(recoveredId)
                 } else {
@@ -1287,20 +1317,11 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                 // Deduplication does not start a turn or promise another terminal
                 // event. Remove our duplicate bubble, but preserve any live turn
                 // that an owner event established while the receipt was in flight.
+                const status = result.status
+
                 const next = updateSessionState(
                   receiptSessionId,
-                  state => ({
-                    ...state,
-                    messages: result.status === 'unknown' ? state.messages : state.messages.filter(message => message.id !== optimisticId),
-                    ...(!state.turnLive &&
-                      !state.streamId &&
-                      !state.sawAssistantPayload && {
-                        busy: false,
-                        awaitingResponse: false,
-                        pendingBranchGroup: null,
-                        turnStartedAt: null
-                      })
-                  }),
+                  state => settleNonStartingReceipt(state, status, optimisticId),
                   targetStoredSessionId
                 )
 
@@ -1317,24 +1338,8 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
             const rowId = result?.user_row_id
 
-            if (typeof rowId === 'number' && Number.isSafeInteger(rowId) && rowId > 0) {
-              // The worker may finish before this acknowledgement arrives. Bind
-              // only this send's optimistic occurrence; never reset live state or
-              // assume the newest user row still belongs to this RPC.
-              updateSessionState(receiptSessionId, state => {
-                const index = state.messages.findIndex(
-                  message => message.id === optimisticId && message.role === 'user'
-                )
-
-                if (index < 0 || state.messages[index].rowId === rowId) {
-                  return state
-                }
-
-                return {
-                  ...state,
-                  messages: state.messages.map((message, i) => (i === index ? { ...message, rowId } : message))
-                }
-              })
+            if (isReceiptRowId(rowId)) {
+              updateSessionState(receiptSessionId, state => bindOptimisticRowId(state, optimisticId, rowId))
             }
 
             return true
@@ -1374,13 +1379,13 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           storedSessionId: recoverStoredSessionId ?? null
         })
 
-        if (usingComposerAttachments) {
-          // A submit owns only the occurrences that actually reached the
-          // gateway. Tokenized chips match across staging clones; legacy chips
-          // match by exact object identity, so a newer same-id replacement is
-          // preserved while the staged object for a submitted file is removed.
-          scope.removeAttachments(syncedAttachments)
-        }
+        // A submit owns only the occurrences that actually reached the gateway (submit-hold.ts).
+        hold.accepted({
+          ownsChips: usingComposerAttachments,
+          removeAttachments: scope.removeAttachments,
+          answerCard: cardId =>
+            updateSessionState(liveSessionId, state => answerMoveErrorCard(state, cardId), targetStoredSessionId)
+        })
 
         // Submit landed — the turn now runs (busy stays true), but the submit
         // window is closed, so release the lock for the next (sequential) send.
@@ -1389,6 +1394,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         return true
       } catch (err) {
         releaseBusy()
+        hold.release()
 
         unstageRefusedImages(err, usingComposerAttachments, scope, attachments)
 
@@ -1405,35 +1411,15 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           return false
         }
 
-        const message = inlineErrorMessage(err, copy.promptFailed)
-        const occurredAt = Date.now() / 1000
+        // Paint (or repaint) this refusal's error card; an ownership refusal also arms "Move here".
+        const card = {
+          id: hold.refuse(err, sessionId, targetStoredSessionId),
+          message: inlineErrorMessage(err, copy.promptFailed),
+          fallback: copy.promptFailed,
+          occurredAt: Date.now() / 1000
+        }
 
-        updateSessionState(
-          sessionId,
-          state => ({
-            ...state,
-            messages: [
-              ...state.messages,
-              {
-                id: `assistant-error-${Date.now()}`,
-                role: 'assistant',
-                parts: [],
-                error: message || copy.promptFailed,
-                ...ownershipErrorSurface(err),
-                branchGroupId: state.pendingBranchGroup ?? undefined,
-                completedAt: occurredAt,
-                timestamp: occurredAt
-              }
-            ],
-            busy: false,
-            awaitingResponse: false,
-            pendingBranchGroup: null,
-            sawAssistantPayload: true,
-            // The failed submit's clock seed dies with the turn it never got.
-            turnStartedAt: null
-          }),
-          targetStoredSessionId
-        )
+        updateSessionState(sessionId, state => withRefusalCard(state, err, card), targetStoredSessionId)
 
         if (targetIsCurrentView() && isProviderSetupError(err)) {
           requestDesktopOnboarding(copy.providerCredentialRequired)

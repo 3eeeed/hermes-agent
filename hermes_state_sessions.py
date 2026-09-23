@@ -1757,6 +1757,8 @@ class SessionSessionsMixin:
             for sid in scope:  # orphan remaining children (branches) so FK is satisfied
                 conn.execute("UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?", (sid,))
                 conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+                # Send reservations are keyed by the STORED id; a deleted chat gets no next submit to prune them.
+                conn.execute("DELETE FROM prompt_send_ledger WHERE session_key = ?", (sid,))
             conn.executemany("DELETE FROM sessions WHERE id = ?", [(sid,) for sid in scope])
             self._delete_unreferenced_system_prompts(conn)
             removed_ids.extend(scope)
@@ -1906,6 +1908,8 @@ class SessionSessionsMixin:
                 )
                 conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
                 conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
+                conn.execute(  # same sweep as delete_session(): no chat left to prune them
+                    f"DELETE FROM prompt_send_ledger WHERE session_key IN ({ph})", chunk)
             self._delete_unreferenced_system_prompts(conn)
             removed_ids.extend(expanded)
             # Count the ids the CALLER asked for, not the expanded chain links —

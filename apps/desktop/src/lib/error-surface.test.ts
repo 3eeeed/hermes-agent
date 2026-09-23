@@ -436,3 +436,67 @@ describe('error card actions: one main action, at most one second option', () =>
     expect(severity({ code: 'SESSION_OWNER_UNCONFIRMED', layer: 'gateway', retryable: false })).toBe('blocking')
   })
 })
+
+describe('a chat another device owns (#106217, cross-device move)', () => {
+  // The fence is per stored session per writer, so Retry can only reproduce the
+  // refusal. What the user actually wants is to move the chat here — which the
+  // gateway allows explicitly, and only with the owner it named.
+  const OWNERSHIP = {
+    age_seconds: 3540,
+    busy: false,
+    generation: 4,
+    handoff_supported: true,
+    lease_id: 'lease-macbook',
+    session_id: '20260919_162101_617cd0',
+    surface: 'desktop'
+  }
+
+  it('offers Move here and Start new session, and never an ordinary Retry', () => {
+    const surface = parseErrorSurface({
+      code: 'SESSION_NOT_OWNED',
+      layer: 'gateway',
+      ownership: OWNERSHIP,
+      retryable: false
+    })!
+
+    expect(errorCardActions(surface)).toEqual({ primary: 'move_here', secondary: 'start_new_session' })
+    expect(errorCardOffers(surface, 'retry')).toBe(false)
+  })
+
+  it('carries the owner the claim has to compare-and-swap against', () => {
+    const surface = parseErrorSurface({
+      code: 'SESSION_NOT_OWNED',
+      layer: 'gateway',
+      ownership: OWNERSHIP,
+      retryable: false
+    })!
+
+    expect(surface.ownership).toEqual({
+      ageSeconds: 3540,
+      busy: false,
+      generation: 4,
+      handoffSupported: true,
+      leaseId: 'lease-macbook',
+      sessionId: '20260919_162101_617cd0',
+      surface: 'desktop'
+    })
+  })
+
+  it('stays a valid surface when an older backend sends no ownership block', () => {
+    const surface = parseErrorSurface({ code: 'SESSION_NOT_OWNED', layer: 'gateway', retryable: false })!
+
+    expect(surface.ownership).toBeUndefined()
+    // The move is still offered: the card decides on the PRESERVED send, which
+    // is what actually makes a claim possible (see store/session-move.ts).
+    expect(errorCardOffers(surface, 'move_here')).toBe(true)
+    expect(errorCardOffers(surface, 'retry')).toBe(false)
+  })
+
+  it('never invents an ownership block from a garbled one', () => {
+    for (const ownership of [{}, { generation: 0, lease_id: 'x' }, { lease_id: '', generation: 3 }, 'nope']) {
+      const surface = parseErrorSurface({ code: 'SESSION_NOT_OWNED', layer: 'gateway', ownership, retryable: false })!
+
+      expect(surface.ownership).toBeUndefined()
+    }
+  })
+})

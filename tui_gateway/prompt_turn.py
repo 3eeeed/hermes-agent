@@ -123,8 +123,14 @@ def _admit_prompt_turn(
     Synthesized turns (auto-continue, wake-ups) call ``_run_prompt_submit`` directly — the
     bypass that once let a second backend run a duplicate turn."""
     held_lease = session.get("active_session_lease")
-    # When the session already holds its lease this is a cheap dict check. See #94778.
-    if not session.get("_closing") and (ownership_refusal := _ensure_active_session_slot(sid, session)) is not None:
+    # Ownership is re-proven against the registry, then the turn is PUBLISHED there, before the
+    # history/attachment mutations below. An attached lease is evidence of a past claim only: after
+    # an explicit handoff from another device it names a superseded fencing generation (#94778 kept
+    # the fast path for the common case; correctness needs the re-proof).
+    ownership_refusal = None
+    if not session.get("_closing"):
+        ownership_refusal = _ensure_active_session_slot(sid, session) or _reserve_session_turn(sid, session)
+    if ownership_refusal is not None:
         logger.info(
             "Refusing turn for session %s at _run_prompt_submit: %s",
             session.get("session_key") or sid,
@@ -132,15 +138,34 @@ def _admit_prompt_turn(
         with session["history_lock"]:
             session["running"] = False
             session.pop("_submit_user_row", None)  # no turn runs: the submit-time row stays as the send
+            # Explicit, so a caller that staged something for this turn can tell an OWNERSHIP
+            # refusal from any other non-start and put it back (the queued drain restores the
+            # user's envelope on exactly this signal). Inferring it from a missing lease would
+            # also fire for sessions that never claimed one.
+            session["_turn_ownership_refused"] = str(getattr(ownership_refusal, "reason", "") or "refused")
         if report_ownership_refusal:
-            _emit("error", sid, {"message": str(ownership_refusal)})
+            # The same machine-readable half ``prompt.submit`` answers a 4090 with. A turn
+            # refused HERE (the submit was accepted, then the fence caught it at admission —
+            # the ordinary shape when staging an attachment warmed a deferred build) reaches
+            # the client only as this event, so without the surface the client can classify
+            # the refusal from prose at best, and can never offer the move: the owner's
+            # compare-and-swap precondition travels in ``ownership`` and nowhere else.
+            from tui_gateway.methods_prompt import _ownership_error_data
+            refusal_data = _ownership_error_data(ownership_refusal)
+            _emit("error", sid, {
+                "message": str(ownership_refusal),
+                "error_surface": {
+                    "layer": "gateway", "code": refusal_data.get("reason") or "refused", "retryable": False,
+                    **({"ownership": refusal_data["ownership"]} if "ownership" in refusal_data else {})}})
         return None
+    session.pop("_turn_ownership_refused", None)
     with session["history_lock"]:
         if session.get("_closing") or (
             queued_prompt_generation is not None
             and int(session.get("_queued_prompt_generation", 0)) != queued_prompt_generation):
             session["running"] = False
             session.pop("_submit_user_row", None)
+            _finish_session_turn(sid, session)  # reserved above; no turn will run under it
             if session.get("_closing") and session.get("active_session_lease") is not held_lease:
                 # Close stops waiting for this thread after a grace and then finalizes. A lease this
                 # admission claimed after that finalize has no other code path that releases it; one
@@ -170,6 +195,7 @@ def _admit_prompt_turn(
         # thread with ``running`` still True — the prompt vanished and the session stayed "busy" (#111531).
         reason = session.get("agent_error") or AGENT_MISSING_FOR_TURN
         logger.info("Refusing turn for session %s: no agent attached (%s)", session.get("session_key") or sid, reason)
+        _finish_session_turn(sid, session)  # reserved above; no turn will run under it
         _emit_terminal_turn_error(
             sid, session, reason,
             error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True})
@@ -422,20 +448,23 @@ def _after_complete_turn(sid: str, session: dict, st: _TurnRun, raw: Any) -> Non
 
 
 def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str, *,
-                            on_done=None, on_error=None) -> None:
+                            on_done=None, on_error=None) -> bool:
     """Chain one follow-up turn (caller set ``running``); on failure run ``on_error``, log,
-    release ``running``."""
+    release ``running``.  True when a worker really took the turn over — the caller's
+    registry reservation belongs to that worker from then on."""
     try:
         _emit("message.start", sid)
-        _run_prompt_submit(rid, sid, session, prompt)
+        started = bool(_run_prompt_submit(rid, sid, session, prompt))
         if on_done is not None:
             on_done()
+        return started
     except Exception as exc:
         if on_error is not None:
             on_error()
         _hook_failure(what, exc)
         with session["history_lock"]:
             session["running"] = False
+        return False
 
 
 def _run_post_turn_followups(
@@ -443,45 +472,76 @@ def _run_post_turn_followups(
     """Chain whatever should run after ``running`` was released.  Order: a mid-turn user
     prompt wins over every auto follow-up (drain it, skip the rest); a leftover /steer is
     requeued first so it isn't dropped; then goal continuation, then completion
-    notifications.  Each nested submit re-checks ``running`` under the lock."""
-    steer = result.get("pending_steer") if isinstance(result, dict) else None
-    if isinstance(steer, str) and steer.strip():
-        with session["history_lock"]:
-            _enqueue_prompt(session, steer, session.get("transport"))
-    if _drain_queued_prompt(rid, sid, session):
-        return
-    if goal_followup:
-        with _session_turn_admission(session) as admitted:
-            if not admitted or session.get("running"):
-                return  # user already sent something — their turn wins
-            if session.get("_turn_cancel_requested"):
-                return  # the user pressed Stop; the goal resumes after their next prompt
-            session["running"] = True
-        _dispatch_followup_turn(rid, sid, session, goal_followup, "goal continuation dispatch")
-    # Safety net for completion events that arrived mid-turn.  Ownership is positive-proof
-    # and compression-chain aware (same fail-closed gate as the poller): session B must
-    # not consume session A's event.  Unclaimable events are requeued for the poller.
-    try:
-        from tools.process_registry import process_registry
-        # _release_turn_scopes / _post_turn_housekeeping have released the worker's runtime scopes. Queue ownership,
-        # notification policy and nested dispatch still belong to this session.
-        from tools.process_registry_awaiting import drained_for
-        from tools.process_registry_notifications import format_process_notification, should_surface_notification
-        key = session.get("session_key", "")
-        owns = lambda e: process_registry._owns_event(
-            e, key, lambda evt: _session_owns_notification_event(sid, session, evt), e.get("type") == "async_delegation")
-        # Every dequeued event's owner — this session's and any other session's — stays held until the foreign events
-        # are requeued and ours are routed, so the reapers never see an owner whose notice is in nobody's hands.
-        with _session_profile_runtime_scope(session), drained_for(process_registry, owns) as mine:
-            deferred = []
-            _notif_handle_ready(
-                sid, session, [evt for evt in mine if should_surface_notification(evt)],
-                session.setdefault("_notification_emitted", set()), process_registry,
-                format_process_notification, deferred, owned=True)
-            for event in deferred:
-                process_registry.completion_queue.put(event)
-    except Exception as _drain_exc:
-        _hook_failure("completion queue drain", _drain_exc)
+    notifications.  Each nested submit re-checks ``running`` under the lock.
+
+    The whole phase runs under a REserved turn.  ``running`` dropping and the finalizing
+    turn releasing its marker end that turn's own writes, not its work: the queue, the
+    ``running`` latch and the shared completion queue touched below all belong to whoever
+    owns the chat NOW, and a handoff can commit in the gap.  ``_reserve_session_turn``
+    re-proves ownership and republishes the busy marker in one atomic step, so a fenced
+    runtime mutates nothing here and a lost race costs the user nothing — the steer is not
+    appended, the queued message stays queued for the new owner, and the notification
+    events go back to the poller untouched.  The reservation is handed to the follow-up
+    turn whenever one really starts (``keep()``); releasing it behind a live turn is the
+    idle-owner-still-writing window the fence exists to close."""
+    with _session_turn_reservation(sid, session) as reservation:
+        if reservation.refusal is not None:
+            logger.info("Post-turn follow-ups for %s skipped: %s",
+                        session.get("session_key") or sid,
+                        getattr(reservation.refusal, "reason", None) or "refused")
+            steer = result.get("pending_steer") if isinstance(result, dict) else None
+            if (isinstance(steer, str) and steer.strip()) or session.get("queued_prompt") or goal_followup:
+                # Stranded, not dropped: say so once rather than let the follow-up vanish.
+                _emit("error", sid, {"message": str(reservation.refusal)})
+            return
+        steer = result.get("pending_steer") if isinstance(result, dict) else None
+        if isinstance(steer, str) and steer.strip():
+            with session["history_lock"]:
+                _enqueue_prompt(session, steer, session.get("transport"))
+        if _drain_queued_prompt(rid, sid, session):
+            # The drain reserves for itself and either handed the marker to the dispatched
+            # turn or already cleared it; a release here would end somebody else's turn.
+            reservation.keep()
+            return
+        if goal_followup:
+            with _session_turn_admission(session) as admitted:
+                if not admitted or session.get("running"):
+                    return  # user already sent something — their turn wins
+                if session.get("_turn_cancel_requested"):
+                    return  # the user pressed Stop; the goal resumes after their next prompt
+                session["running"] = True
+            if _dispatch_followup_turn(rid, sid, session, goal_followup, "goal continuation dispatch"):
+                # The continuation turn owns the marker now, and runs this same phase when
+                # it ends — that is where the completion drain below happens for it.
+                reservation.keep()
+                return
+        worker_before = session.get("_run_thread")
+        # Safety net for completion events that arrived mid-turn.  Ownership is positive-proof
+        # and compression-chain aware (same fail-closed gate as the poller): session B must
+        # not consume session A's event.  Unclaimable events are requeued for the poller.
+        try:
+            from tools.process_registry import process_registry
+            # _release_turn_scopes / _post_turn_housekeeping have released the worker's runtime scopes. Queue ownership,
+            # notification policy and nested dispatch still belong to this session.
+            from tools.process_registry_awaiting import drained_for
+            from tools.process_registry_notifications import format_process_notification, should_surface_notification
+            key = session.get("session_key", "")
+            owns = lambda e: process_registry._owns_event(
+                e, key, lambda evt: _session_owns_notification_event(sid, session, evt), e.get("type") == "async_delegation")
+            # Every dequeued event's owner — this session's and any other session's — stays held until the foreign events
+            # are requeued and ours are routed, so the reapers never see an owner whose notice is in nobody's hands.
+            with _session_profile_runtime_scope(session), drained_for(process_registry, owns) as mine:
+                deferred = []
+                _notif_handle_ready(
+                    sid, session, [evt for evt in mine if should_surface_notification(evt)],
+                    session.setdefault("_notification_emitted", set()), process_registry,
+                    format_process_notification, deferred, owned=True)
+                for event in deferred:
+                    process_registry.completion_queue.put(event)
+        except Exception as _drain_exc:
+            _hook_failure("completion queue drain", _drain_exc)
+        if session.get("_run_thread") is not worker_before:
+            reservation.keep()  # a notification turn started and owns the marker
 
 
 @dataclasses.dataclass(slots=True)
@@ -1326,7 +1386,17 @@ def _run_prompt_submit(
                 session.pop("_auto_continue_scheduled", None)
                 _emit_settled_session_info(sid, session, st.agent)
             finally:
-                _post_turn_housekeeping(sid, session, st)
+                try:
+                    # LAST: the chat becomes movable to another device only once this turn's final
+                    # durable writes have landed — the crash marker retired above and the settled
+                    # session info published. ``running`` going False is not the end of the turn;
+                    # releasing the reservation there advertised an idle owner that was still
+                    # writing, and a claim landing in that window interleaved two devices'
+                    # bookkeeping. Any follow-up reserves a turn of its own before it touches
+                    # queue or session state (``_admit_prompt_turn`` / ``_drain_queued_prompt``).
+                    _finish_session_turn(sid, session)
+                finally:
+                    _post_turn_housekeeping(sid, session, st)
         return st.result, goal_followup
     def run():
         from agent.notification_presentation import notification_turn
@@ -1353,6 +1423,7 @@ def _run_prompt_submit(
             session["running"] = False
             if session.get(SESSION_KEY) is segments:
                 session.pop(SESSION_KEY)
+        _finish_session_turn(sid, session)  # admitted and reserved, but no worker ever started
     return can_start
 
 

@@ -3,10 +3,17 @@
 // refusals it can mean so the card and toast read like a classified turn:
 // plain words up front, raw text demoted to the detail line, and Retry gone
 // where retrying reproduces the failure.
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { ComposerAttachment } from '@/store/composer'
 import { $notifications } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
+import {
+  $pendingSessionMoves,
+  canMoveSessionHere,
+  forgetInFlightSend,
+  rememberInFlightSend
+} from '@/store/session-move'
 
 import { handleStatusEvent } from './status'
 import type { GatewayEventContext } from './types'
@@ -18,9 +25,10 @@ const OWNED_REFUSAL =
   'Session 20260909_095312_6b93f5 already has a live owner (tui, pid 32977, lease age 22m). ' +
   'Attach through a compatible owner, or close the session in its owning surface before resuming here.'
 
-function errorContext(message: string, code?: string) {
+// A string is the gateway's own `code`; an object is extra payload fields (error_surface).
+function errorContext(message: string, extra: Record<string, unknown> | string = {}) {
   const failAssistantMessage = vi.fn()
-  const payload = { code, message } as GatewayEventContext['payload']
+  const payload = { message, ...(typeof extra === 'string' ? { code: extra } : extra) } as GatewayEventContext['payload']
 
   const ctx: GatewayEventContext = {
     deps: {
@@ -129,5 +137,158 @@ describe('gateway `error` event → error card + toast', () => {
     handleStatusEvent({ ...ctx, isActiveEvent: true })
 
     expect($notifications.get()).toEqual([expect.objectContaining({ message: sentence })])
+  })
+})
+
+// The cross-device miss (#106217 follow-up): the gateway ACCEPTS prompt.submit and the
+// fence catches the turn at ADMISSION — the ordinary shape once staging an attachment
+// has warmed a deferred agent build. The refusal then arrives here, on the event stream,
+// long after the submit pipeline's own catch could see it. The card rendered the
+// SESSION_NOT_OWNED copy and no "Move here", because nothing promoted the send the
+// composer had already cleared from the draft.
+describe('an ownership refusal that arrives as a turn error', () => {
+  const STORED = '20260919_162101_617cd0'
+  const RUNTIME = 'sess-1'
+
+  const OWNERSHIP_WIRE = {
+    age_seconds: 62,
+    busy: false,
+    generation: 3,
+    handoff_supported: true,
+    lease_id: 'lease-macbook',
+    session_id: STORED,
+    surface: 'desktop'
+  }
+
+  const IMAGE: ComposerAttachment = {
+    id: 'att-shot',
+    kind: 'image',
+    label: 'shot.png',
+    path: '/remote/.hermes/images/upload_1.png'
+  }
+
+  /** The send the submit pipeline holds once the gateway has accepted it. */
+  const holdImageSend = () =>
+    rememberInFlightSend(RUNTIME, {
+      attachments: [IMAGE],
+      ownership: null,
+      payload: { text: 'what is in this screenshot?' },
+      runtimeId: RUNTIME,
+      storedSessionId: STORED,
+      text: 'what is in this screenshot?'
+    })
+
+  beforeEach(() => {
+    $pendingSessionMoves.set({})
+    forgetInFlightSend(RUNTIME)
+  })
+
+  it('promotes the held send to a movable attempt keyed by the STORED chat', () => {
+    holdImageSend()
+
+    const { ctx } = errorContext(OWNED_REFUSAL, {
+      error_surface: { code: 'SESSION_NOT_OWNED', layer: 'gateway', ownership: OWNERSHIP_WIRE, retryable: false }
+    })
+
+    expect(handleStatusEvent(ctx)).toBe(true)
+
+    // Keyed by the stored chat the card asks about — never the runtime id the event named.
+    const queued = $pendingSessionMoves.get()[STORED]
+
+    expect(queued).toHaveLength(1)
+    expect(queued[0].text).toBe('what is in this screenshot?')
+    expect(queued[0].attachments).toEqual([IMAGE])
+    // Replayed verbatim: a payload rebuilt at click time collides with its own send id.
+    expect(queued[0].payload).toEqual({ text: 'what is in this screenshot?' })
+    expect(queued[0].attemptId).toBeTruthy()
+    expect(queued[0].sendId).toBeTruthy()
+    // ...and the card can actually offer the move.
+    expect(canMoveSessionHere(STORED)).toBe(true)
+  })
+
+  it('carries the owner block onto the error bubble so the card gates on the same evidence', () => {
+    holdImageSend()
+
+    const { ctx, failAssistantMessage } = errorContext(OWNED_REFUSAL, {
+      error_surface: { code: 'SESSION_NOT_OWNED', layer: 'gateway', ownership: OWNERSHIP_WIRE, retryable: false }
+    })
+
+    handleStatusEvent(ctx)
+
+    expect(failAssistantMessage).toHaveBeenCalledWith(
+      RUNTIME,
+      OWNED_REFUSAL,
+      1_700_000_100,
+      expect.objectContaining({
+        code: 'SESSION_NOT_OWNED',
+        ownership: expect.objectContaining({ generation: 3, handoffSupported: true, leaseId: 'lease-macbook' })
+      })
+    )
+  })
+
+  it('promotes exactly once — a repeated refusal cannot queue the same message twice', () => {
+    holdImageSend()
+
+    const event = () =>
+      errorContext(OWNED_REFUSAL, {
+        error_surface: { code: 'SESSION_NOT_OWNED', layer: 'gateway', ownership: OWNERSHIP_WIRE, retryable: false }
+      }).ctx
+
+    handleStatusEvent(event())
+    handleStatusEvent(event())
+
+    expect($pendingSessionMoves.get()[STORED]).toHaveLength(1)
+  })
+
+  // The card this refusal paints is the one a landed "Move here" has to take back down.
+  // Only failAssistantMessage knows which row carried the failure (it either seals the
+  // live assistant bubble or mints one), so the dispatcher binds that id to the attempt
+  // it just armed. Without it the replay has no way to name the stale card except "any
+  // ownership error" — which would also delete an older card still holding its own
+  // unsent message.
+  it('binds the card it painted to the attempt it armed', () => {
+    holdImageSend()
+
+    const { ctx, failAssistantMessage } = errorContext(OWNED_REFUSAL, {
+      error_surface: { code: 'SESSION_NOT_OWNED', layer: 'gateway', ownership: OWNERSHIP_WIRE, retryable: false }
+    })
+
+    failAssistantMessage.mockReturnValue('assistant-error-1700000100')
+
+    handleStatusEvent(ctx)
+
+    expect($pendingSessionMoves.get()[STORED][0].errorMessageId).toBe('assistant-error-1700000100')
+  })
+
+  it('binds nothing when no send was held — an unrelated turn error owns no attempt', () => {
+    const { ctx, failAssistantMessage } = errorContext(OWNED_REFUSAL, {
+      error_surface: { code: 'SESSION_NOT_OWNED', layer: 'gateway', ownership: OWNERSHIP_WIRE, retryable: false }
+    })
+
+    failAssistantMessage.mockReturnValue('assistant-error-1700000100')
+
+    handleStatusEvent(ctx)
+
+    // Fail-closed: no held send, so no attempt was invented to hang the card on.
+    expect($pendingSessionMoves.get()).toEqual({})
+  })
+
+  it('releases the hold on a terminal error that is not an ownership refusal', () => {
+    holdImageSend()
+
+    const { ctx } = errorContext('The model provider had an internal error. Your message was not answered.')
+
+    handleStatusEvent(ctx)
+
+    expect($pendingSessionMoves.get()).toEqual({})
+
+    // Nothing is held, so a LATER turn's ownership refusal cannot resurrect this send.
+    const { ctx: refusal } = errorContext(OWNED_REFUSAL, {
+      error_surface: { code: 'SESSION_NOT_OWNED', layer: 'gateway', ownership: OWNERSHIP_WIRE, retryable: false }
+    })
+
+    handleStatusEvent(refusal)
+
+    expect($pendingSessionMoves.get()).toEqual({})
   })
 })

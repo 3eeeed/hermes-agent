@@ -3445,6 +3445,24 @@
       }
     },
     {
+      "name": "session.handoff.claim",
+      "summary": "Explicitly move a chat's write lease to this device (user-invoked; refuses a busy or changed owner with 4090 + a machine-readable reason).",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionHandoffClaimParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SessionHandoffClaimResult"
+        }
+      }
+    },
+    {
       "name": "session.history",
       "summary": "The durable display transcript (ancestors included, row ids attached).",
       "params": [
@@ -17891,11 +17909,21 @@
       },
       "ErrorPayload": {
         "additionalProperties": false,
-        "description": "Every ``_emit(\"error\", \u2026)`` site sets exactly ``message``.",
+        "description": "Session-level failure; ownership refusals also carry their typed move precondition.",
         "properties": {
           "message": {
             "title": "Message",
             "type": "string"
+          },
+          "error_surface": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error Surface"
           }
         },
         "required": [
@@ -32362,6 +32390,33 @@
             ],
             "default": null,
             "title": "Rebind Survivor Row Ids"
+          },
+          "client_send_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Client Send Id"
+          },
+          "staged_attachment_paths": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Staged Attachment Paths"
           }
         },
         "required": [
@@ -37424,6 +37479,73 @@
           }
         },
         "title": "SessionForeignPreviewResult",
+        "type": "object"
+      },
+      "SessionHandoffClaimParams": {
+        "additionalProperties": false,
+        "description": "The claimant echoes the owner it OBSERVED (from a ``4090`` refusal's ``ownership`` block),\nso the transfer is an exact compare-and-swap: a replayed or superseded observation cannot\nmove the lease. ``session_id`` is this device's live runtime id for the chat.",
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "expected_lease_id": {
+            "title": "Expected Lease Id",
+            "type": "string"
+          },
+          "expected_generation": {
+            "title": "Expected Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_id",
+          "expected_lease_id",
+          "expected_generation"
+        ],
+        "title": "SessionHandoffClaimParams",
+        "type": "object"
+      },
+      "SessionHandoffClaimResult": {
+        "additionalProperties": false,
+        "description": "``claimed`` = the lease moved and the previous runtime is fenced; ``already_owner`` = this\nruntime held it (a double-clicked \"Move here\"). ``generation`` is the new fencing generation.",
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stored_session_id": {
+            "title": "Stored Session Id",
+            "type": "string"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "session_id",
+          "stored_session_id",
+          "generation"
+        ],
+        "title": "SessionHandoffClaimResult",
         "type": "object"
       },
       "SessionHistoryParams": {
