@@ -53,6 +53,7 @@ import {
 } from './preview'
 import { forgetPendingRuntimeTabs } from './preview-ownership'
 import { dropPreviewArtifactsForProfile, migratePreviewArtifactsForProfile } from './preview-status'
+import { dropModePreferences, migrateModePreferences } from './agent-modes'
 import { $activeGatewayProfile, normalizeProfileKey } from './profile'
 import { $projectTree } from './project-tree'
 import { clearAllProviderWaits, clearSessionProviderWait } from './provider-wait'
@@ -2791,6 +2792,7 @@ export function dropTilesForProfile(
     $sessionTiles.set(next)
   }
 
+  dropModePreferences(name, routeConnection || 'local')
   persistTiles()
   // The rail is a profile-keyed family too: a deleted profile's tabs must not
   // outlive it, or a later profile of the same name inherits them.
@@ -2863,6 +2865,7 @@ export function migrateTilesForProfile(oldProfile: string, newProfile: string): 
   // the renamed profile opens with an empty rail and the old name keeps them.
   migratePreviewTabsForProfile(from, to)
   migrateBrowserProfilePrefs(from, to)
+  migrateModePreferences(from, to)
 }
 
 /** ⌘⇧T — reopen the most recently closed tab where it was, then focus it.

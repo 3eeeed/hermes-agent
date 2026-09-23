@@ -549,6 +549,7 @@ const ChatViewContent = memo(function ChatViewContent({
   const awaitingResponse = useStore(view.$awaitingResponse)
   const busy = useStore(view.$busy)
   const activeGatewayProfile = useStore($activeGatewayProfile)
+  const modeConnectionId = useStore($connection)?.connectionId ?? 'local'
   const contextSuggestions = useStore($contextSuggestions)
   // Per-session (SessionView) reads — a tile IS its session, so these come
   // from the view slice, not the global atoms (which track the primary only).
@@ -844,6 +845,7 @@ const ChatViewContent = memo(function ChatViewContent({
                 freshDraftKey={freshDraftKey}
                 gateway={gateway}
                 maxRecordingSeconds={maxVoiceRecordingSeconds}
+                modeOwner={{ connectionId: modelOptionsOwnerConnectionId ?? modeConnectionId, profile: modelOptionsProfile || activeGatewayProfile }}
                 onAddContextRef={onAddContextRef}
                 onAddUrl={onAddUrl}
                 onAttachDroppedItems={onAttachDroppedItems}

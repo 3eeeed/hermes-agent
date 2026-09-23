@@ -31,13 +31,14 @@ import { refreshMemoryStatus } from '@/store/memory-status'
 import { notify, notifyError } from '@/store/notifications'
 import { normalizeProfileKey } from '@/store/profile'
 import { repoDiscoveryPolicyFromConfig, repoDiscoveryPolicySignature, scanAndRecordRepos } from '@/store/projects'
-import { $settingsRequestProfile } from '@/store/settings-scope'
+import { $settingsRequestProfile, $settingsScopeProfile } from '@/store/settings-scope'
 import type { ConfigFieldSchema, HermesConfigRecord } from '@/types/hermes'
 
 import { hermesConfigCacheWriter, useHermesConfigRecord } from '../hooks/use-config-record'
 import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
 import { PanelEmpty } from '../overlays/panel'
 
+import { AgentModesSettings } from './agent-modes-settings'
 import { ConfigField } from './config-field'
 import { configSubpageForField } from './config-subpages'
 import { DELEGATION_ROUTE_COMPANION_KEY, DelegationRouteRow } from './delegation-route-row'
@@ -111,6 +112,8 @@ function ConfigSettingsInner({
   scopeProfile
 }: ConfigSettingsProps & { scopeProfile: string | undefined }) {
   const { t } = useI18n()
+  const modeProfile = useStore($settingsScopeProfile)
+  const modeConnection = useStore($activeConnectionId)
   const c = t.settings.config
   const keepAwakeMode = useStore($keepAwakeMode)
 
@@ -403,6 +406,9 @@ function ConfigSettingsInner({
       {activeSectionId === 'model' && (
         <div className={showModelSettings ? 'mb-6' : undefined}>
           <ModelSettings onMainModelChanged={onMainModelChanged} scopeProfile={scopeProfile} subpage={subpage} />
+          {(subpage === undefined || subpage === 'main') && (
+            <AgentModesSettings connectionId={modeConnection} profile={modeProfile} />
+          )}
         </div>
       )}
       {children}

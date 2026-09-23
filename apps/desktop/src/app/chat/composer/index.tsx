@@ -132,6 +132,7 @@ function controlRowGridClass(singleColumn: boolean, stacked: boolean): string {
 
 export function ChatBar({
   busy,
+  modeOwner,
   cwd,
   disabled,
   focusKey,
@@ -169,7 +170,7 @@ export function ChatBar({
   })
 
   // Voice-stop interception + contributed middleware wrap every send.
-  const { onSubmit, voiceStopRef } = useMiddlewareSubmit(onSubmitProp)
+  const { onSubmit, voiceStopRef } = useMiddlewareSubmit(onSubmitProp, modeOwner)
 
   // Which live composer this instance IS (main | tile) — its attachment set,
   // focus-bus key, and awaiting-input edge. Main scope = the legacy globals.
@@ -1147,6 +1148,7 @@ export function ChatBar({
       hasComposerPayload={hasComposerPayload}
       hideModelPill={guidedChat}
       minimal={minimal || chatOnboardingSolo}
+      modeOwner={modeOwner}
       onDictate={dictate}
       onQueue={() => {
         // Queueing clears the draft too, so the list over it closes with it.

@@ -1114,6 +1114,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           text,
           submission_id: submissionId,
           ...(imageAttachments.length && { attachments: imageAttachments }),
+          ...(options?.modePayload ?? {}),
           ...(interrupted && { interrupted }),
           // Off-screen widget intent: the gateway types the persisted user
           // row display_kind=hidden so no client renders it as a bubble.

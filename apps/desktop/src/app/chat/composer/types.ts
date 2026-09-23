@@ -37,6 +37,7 @@ export interface ChatBarState {
 }
 
 export interface ChatBarProps {
+  modeOwner?: { connectionId: string | null; profile: string }
   busy: boolean
   disabled: boolean
   focusKey?: string | null

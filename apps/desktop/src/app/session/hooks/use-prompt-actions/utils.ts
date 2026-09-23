@@ -801,6 +801,8 @@ export interface SubmitTextOptions {
   destination?: SubmissionDestination
   /** Stable caller-owned identity; retain across uncertain admission retries. */
   submission_id?: string
+  /** Immutable native execution choice captured at composer dispatch. Omitted for Normal. */
+  modePayload?: { execution_mode: 'delegate' | 'debate'; mode_options: Record<string, unknown> }
   attachments?: ComposerAttachment[]
   /** The composer scope key that was actually loaded when this text was
    *  submitted (see use-composer-draft's activeQueueSessionKeyRef). Compared

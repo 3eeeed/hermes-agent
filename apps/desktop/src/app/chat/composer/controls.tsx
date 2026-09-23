@@ -12,6 +12,7 @@ import { recordAction } from '@/store/desktop-metrics'
 import { $hudMode, closeHud, resetHudLayout } from '@/store/hud'
 import { $wakeWord, toggleWakeWord } from '@/store/wake-word'
 
+import { AgentModeSelector } from './agent-mode-selector'
 import { ACTIVE_ICON_BTN, GHOST_ICON_BTN, PRIMARY_ICON_BTN } from './control-classes'
 import type { ConversationStatus } from './hooks/use-voice-conversation'
 import { ModelPill } from './model-pill'
@@ -48,6 +49,7 @@ interface ConversationProps {
 
 export function ComposerControls({
   autoSpeak,
+  modeOwner,
   busy,
   busyAction,
   canSubmit,
@@ -67,6 +69,7 @@ export function ComposerControls({
   onToggleAutoSpeak
 }: {
   autoSpeak: boolean
+  modeOwner?: { connectionId: string | null; profile: string }
   busy: boolean
   busyAction: 'interrupt' | 'steer' | 'queue' | 'stop'
   canSubmit: boolean
@@ -151,6 +154,7 @@ export function ComposerControls({
               {compactModelPill ? null : <ReasoningPill disabled={disabled} model={state.model} />}
             </>
           )}
+          {modeOwner && !hudMode && <AgentModeSelector connectionId={modeOwner.connectionId} disabled={disabled} profile={modeOwner.profile} />}
           {voiceControls}
         </>
       )}

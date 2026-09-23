@@ -1,6 +1,8 @@
 import { useCallback, useRef } from 'react'
 
 import { interceptsTypedVoiceStop } from '@/lib/voice-stop-word'
+import { modePayload, modeScopeKey, selectedMode } from '@/store/agent-modes'
+import { notifyError } from '@/store/notifications'
 
 import { runComposerMiddleware } from '../contrib'
 import type { ChatBarProps } from '../types'
@@ -10,7 +12,10 @@ interface VoiceStopHandle {
   end: () => void
 }
 
-export function useMiddlewareSubmit(onSubmitProp: ChatBarProps['onSubmit']) {
+export function useMiddlewareSubmit(onSubmitProp: ChatBarProps['onSubmit'], modeOwner?: ChatBarProps['modeOwner']) {
+  const modeConnectionId = modeOwner?.connectionId
+  const modeProfile = modeOwner?.profile
+
   // Typed stop phrase during an active voice conversation ends it — same
   // semantics as SAYING "stop" (voice-stop-word.ts) or clicking the pill's
   // end control. The caller populates it after useComposerVoice (the submit
@@ -22,6 +27,25 @@ export function useMiddlewareSubmit(onSubmitProp: ChatBarProps['onSubmit']) {
   // exact pass-through, so surfaces without contributions are byte-identical.
   const onSubmit = useCallback<ChatBarProps['onSubmit']>(
     async (value, options) => {
+      // The Agent mode is snapshotted at dispatch so a later dropdown change
+      // never rewrites a message already on its way.
+      let modeSnapshot: { execution_mode: 'delegate' | 'debate'; mode_options: Record<string, unknown> } | undefined
+
+      if (modeProfile) {
+        try {
+          const scope = modeScopeKey(modeConnectionId ?? null, modeProfile)
+          const choice = selectedMode(scope)
+
+          if (choice !== 'normal') {
+            modeSnapshot = modePayload(scope, choice) as NonNullable<typeof modeSnapshot>
+          }
+        } catch (error) {
+          notifyError(error, 'This agent mode is unavailable. Your draft was not sent.')
+
+          return false
+        }
+      }
+
       // Bare stop phrase typed while the voice conversation is live: end the
       // conversation (mic off, pill dismissed) instead of sending "stop" to
       // the agent. Spoken transcripts are already stop-checked inside
@@ -43,9 +67,13 @@ export function useMiddlewareSubmit(onSubmitProp: ChatBarProps['onSubmit']) {
         return false
       }
 
-      return onSubmitProp(draft.text, { ...options, attachments: draft.attachments })
+      return onSubmitProp(draft.text, {
+        ...options,
+        attachments: draft.attachments,
+        ...(modeSnapshot && { modePayload: modeSnapshot })
+      })
     },
-    [onSubmitProp]
+    [onSubmitProp, modeConnectionId, modeProfile]
   )
 
   return { onSubmit, voiceStopRef }
