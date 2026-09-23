@@ -112,6 +112,42 @@ def test_fetch_from_api_keeps_supported_in_api_false_models(monkeypatch):
     assert "gpt-5-internal" not in models
 
 
+def test_picker_catalog_unions_models_visible_to_pooled_codex_accounts(monkeypatch):
+    """The picker exposes the union of account-scoped Codex entitlements."""
+    from hermes_cli import auth, codex_models, models
+
+    monkeypatch.setattr(
+        auth,
+        "resolve_codex_runtime_credentials",
+        lambda **_kwargs: {"api_key": "singleton-token"},
+    )
+    monkeypatch.setattr(
+        auth,
+        "read_credential_pool",
+        lambda provider: [
+            {"access_token": "pool-token-a"},
+            {"access_token": "pool-token-b"},
+        ] if provider == "openai-codex" else [],
+    )
+    catalogs = {
+        "singleton-token": ["gpt-singleton"],
+        "pool-token-a": ["gpt-account-a", "gpt-shared"],
+        "pool-token-b": ["gpt-account-b", "gpt-shared"],
+    }
+    monkeypatch.setattr(
+        codex_models,
+        "_fetch_models_from_api",
+        lambda token: catalogs[token],
+    )
+
+    assert models._codex_catalog("openai-codex", force_refresh=True) == [
+        "gpt-singleton",
+        "gpt-account-a",
+        "gpt-shared",
+        "gpt-account-b",
+    ]
+
+
 def test_astra_requires_live_codex_account_discovery(monkeypatch, tmp_path):
     """Cached/configured Astra names must not manufacture current OAuth entitlement."""
     from hermes_cli import codex_models

@@ -1249,17 +1249,33 @@ def _openai_discovery_base_url(provider: str) -> str:
 
 
 def _codex_catalog(normalized: str, force_refresh: bool) -> list[str]:
-    from hermes_cli.codex_models import get_codex_model_ids
+    from hermes_cli.codex_models import _fetch_models_from_api, get_codex_model_ids
 
-    # Live OAuth token so the picker matches what ChatGPT lists for this account; hardcoded
-    # catalog without a token / when unreachable.
+    # Codex entitlements are account-scoped. The singleton token can lag behind the
+    # credential pool (or belong to an account with a narrower rollout), so build
+    # the picker from the union of every configured account's live catalog.
     try:
-        from hermes_cli.auth import resolve_codex_runtime_credentials
+        from hermes_cli.auth import read_credential_pool, resolve_codex_runtime_credentials
 
-        access_token = resolve_codex_runtime_credentials(refresh_if_expiring=True).get("api_key")
+        singleton_token = resolve_codex_runtime_credentials(refresh_if_expiring=True).get("api_key")
+        pool_tokens = [
+            entry.get("access_token")
+            for entry in read_credential_pool("openai-codex")
+            if isinstance(entry, dict)
+        ]
     except Exception:
-        access_token = None
-    return get_codex_model_ids(access_token=access_token)
+        singleton_token, pool_tokens = None, []
+
+    tokens = _merge_unique([], [token for token in (singleton_token, *pool_tokens) if token])
+    discovered: list[str] = []
+    for token in tokens:
+        try:
+            discovered = _merge_unique(discovered, _fetch_models_from_api(token))
+        except Exception:
+            logger.debug("Codex pooled-account model discovery failed", exc_info=True)
+    if discovered:
+        return discovered
+    return get_codex_model_ids(access_token=singleton_token)
 
 
 _COPILOT_ACP_SESSION_MEMO_TTL = 300.0  # 5 min; SWR disk cache handles the rest
