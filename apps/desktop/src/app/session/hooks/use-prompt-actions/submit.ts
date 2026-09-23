@@ -818,6 +818,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // digest → conflict) and can never be sent.
         const payload: PromptSubmitPayload = options?.replayPayload ?? {
           text,
+          ...(options?.modePayload ?? {}),
           ...(interrupted && { interrupted }),
           // Off-screen widget intent: the gateway types the persisted user
           // row display_kind=hidden so no client renders it as a bubble.
