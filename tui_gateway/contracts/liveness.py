@@ -20,6 +20,7 @@ method("ping", params=PingParams, result=PingResult,
 
 class GatewayCapabilitiesResult(Result):
     per_session_exclusive_submit: bool
+    execution_modes: list[str]
 
 
 method("gateway.capabilities", params=PingParams, result=GatewayCapabilitiesResult,

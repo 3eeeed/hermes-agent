@@ -404,7 +404,11 @@ class HostSupervisor:
                 self.rpc_sink(frame["message"])
         elif ftype in ("turn.end", "turn.error"):
             with self._lock:
-                pending = self._pending_turns.pop(request_id, None)
+                pending = self._pending_turns.get(request_id)
+                if pending is not None and pending[0] == frame.get("sid"):
+                    self._pending_turns.pop(request_id, None)
+                else:
+                    pending = None
             if pending is not None and pending[1] is not None:
                 _call_logged(pending[1], frame, "compute host turn completion callback failed")
 
