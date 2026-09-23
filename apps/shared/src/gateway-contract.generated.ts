@@ -1931,6 +1931,7 @@ export interface PingResult {
 }
 export interface GatewayCapabilitiesResult {
   per_session_exclusive_submit: boolean
+  execution_modes: string[]
 }
 export interface ClientCapabilitiesParams {
   server_requests?: boolean
@@ -2751,6 +2752,8 @@ export interface PetScaleResult {
 export interface PromptSubmitParams {
   session_id: string
   profile?: string | null
+  execution_mode?: 'normal' | 'delegate' | 'debate' | null
+  mode_options?: Record<string, unknown> | null
   text?: unknown
   display_kind?: string | null
   interrupted?: boolean | null

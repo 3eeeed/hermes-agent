@@ -673,10 +673,10 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
 
 def _run_after_agent_ready(
     rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None,
-    hosted_images=None,
+    hosted_images=None, execution_spec=None,
 ):
     """Turn thread body: patient wait for a deferred build (a slow build must not eat the
-    accepted in-flight message), then run."""
+    accepted in-flight message), then run. ``execution_spec`` (Debate/Delegate) travels unchanged."""
     # The wait delivers the prompt when the still-running build completes, honors a cancel promptly, notices
     # the user once past the slow threshold, and only errors when the build itself fails or the bounded cap
     # expires. See #63078.
@@ -704,7 +704,8 @@ def _run_after_agent_ready(
             return
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
-        image_paths=hosted_images, terminal_callback=hosted_terminal_callback, turn_author=turn_author)
+        image_paths=hosted_images, terminal_callback=hosted_terminal_callback, turn_author=turn_author,
+        execution_spec=execution_spec)
 
 
 _TRUNCATION_PARAMS = (
@@ -820,6 +821,11 @@ from gateway.session_surface import SURFACES as _CLIENT_SURFACES
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
+    from tui_gateway.prompt_execution_modes import admission_error, build_execution_spec, submit_gate_error
+    # Agent mode (Debate/Delegate) is validated before any history, queue or attachment mutation.
+    if (mode_error := admission_error(params.get("execution_mode"), params.get("mode_options"))) is not None:
+        return _err(rid, 4126, mode_error)
+    execution_spec = build_execution_spec(params.get("execution_mode"), params.get("mode_options"))
     sid = params.get("session_id", "")
     raw_text = params.get("text", "")
     text = sanitize_user_prompt_text(raw_text) if isinstance(raw_text, str) else raw_text
@@ -841,6 +847,9 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    # A failed post-commit external-result replay leaves stale warm history: reopen from SQLite.
+    if session.get("_closing"):
+        return _err(rid, 5035, "session is retiring; reconnect to continue")
     from tools.bot_relay import DeliveryAuthor
 
     # Only the relay handler can build a DeliveryAuthor. A dict here is a client claiming a sender.
@@ -876,6 +885,8 @@ def _(rid, params: dict) -> dict:
         # `/work fix it` sends nine literal chars.
         text = _expand_skill_invocation_for_replay(text, str(session.get("session_key") or ""))
     turn_isolation = _session_uses_compute_host(session, _load_dashboard_process_isolation_config())
+    if (mode_error := submit_gate_error(execution_spec, session, text, turn_isolation)) is not None:
+        return _err(rid, 4126, mode_error)
     if internal_hosted_submit and turn_isolation:
         return _err(rid, 4121, "hosted room turns do not support isolated compute workers yet")
     # Re-bind to the current transport: streaming must stay on the active websocket even
@@ -908,7 +919,7 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4009, "session busy")
         busy_response = _handle_busy_submit(
             rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author,
-            display_kind=display_kind)
+            display_kind=display_kind, execution_spec=execution_spec)
         if busy_response is not None:
             return busy_response
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
@@ -919,6 +930,9 @@ def _(rid, params: dict) -> dict:
         rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
     if err is not None:
         return err
+    from tui_gateway.prompt_execution_modes import stage_execution_spec
+    with session["history_lock"]:
+        stage_execution_spec(session, execution_spec)
     if turn_isolation:
         if turn_author:
             logger.debug("isolated compute turns carry no author yet; the turn from %s runs unattributed",
@@ -965,7 +979,7 @@ def _(rid, params: dict) -> dict:
     run_thread = threading.Thread(
         target=lambda: _run_after_agent_ready(
             rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author,
-            hosted_images),
+            hosted_images, execution_spec if execution_spec.mode != "normal" else None),
         daemon=True)
     # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
     session["_run_thread"] = run_thread

@@ -1,6 +1,6 @@
 """Results that arrive between turns, recorded once as user rows: a detached API delegation's delivery and
-an unviewed local completion's note (#134889 LC-7). Split out of ``hermes_state_messages`` and bound onto
-SessionDB through ``SessionMessagesMixin``; built on its _message_row_params/_execute_write primitives."""
+an unviewed local completion's note (#134889 LC-7); plus an agent-mode (Debate/Delegate) assistant answer
+committed once against its submit row. Split out of ``hermes_state_messages`` and bound onto SessionDB through ``SessionMessagesMixin``; built on its _message_row_params/_execute_write primitives."""
 
 from __future__ import annotations
 
@@ -36,6 +36,43 @@ class SessionDetachedResultsMixin:
         return self._append_detached_result(
             session_id, content, display_kind, {**metadata, "completion_admission": admission_id},
             "json_extract(m.display_metadata, '$.completion_admission') = ?", (admission_id,))
+
+    def append_external_assistant_result(
+        self, session_id: str, *, user_row_id: int, content: str, turn_lease_holder: str,
+    ) -> tuple[int, str]:
+        """Commit one external assistant result for an existing submit row, atomically idempotent.
+
+        The originating user row is the turn identity; lookup and insert share the fenced
+        transcript transaction. Return the canonical stored content on retry.
+        """
+        if not session_id or not isinstance(user_row_id, int) or not turn_lease_holder:
+            raise ValueError("external result requires a session, user row and turn lease")
+        identity = f"external-result:user-row:{user_row_id}"
+        params = self._message_row_params(
+            session_id, "assistant", {"content": content, "platform_message_id": identity},
+            None, time.time(), keep_reasoning=True)
+
+        from hermes_state_messages import _INSERT_MESSAGE_SQL
+
+        def _do(conn):
+            self._check_transcript_write_guards(
+                conn, session_id, None, turn_lease_holder=turn_lease_holder)
+            user = conn.execute(
+                "SELECT role FROM messages WHERE session_id = ? AND id = ? AND active = 1",
+                (session_id, user_row_id)).fetchone()
+            if user is None or user["role"] != "user":
+                raise RuntimeError("external result submit row is no longer active")
+            existing = conn.execute(
+                "SELECT id, content FROM messages WHERE session_id = ? AND role = 'assistant' "
+                "AND platform_message_id = ? AND active = 1 ORDER BY id LIMIT 1",
+                (session_id, identity)).fetchone()
+            if existing is not None:
+                return int(existing["id"]), self._decode_content(existing["content"])
+            row_id = conn.execute(_INSERT_MESSAGE_SQL, params).lastrowid
+            self._bump_session_counters(conn, session_id, 1, 0, unit=True)
+            return int(row_id), content
+
+        return self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 
     def _append_detached_result(self, session_id: str, content: str, display_kind: str, metadata: dict[str, Any],
                                 match_sql: str, params: tuple) -> int:

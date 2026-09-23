@@ -18590,10 +18590,18 @@
           "per_session_exclusive_submit": {
             "title": "Per Session Exclusive Submit",
             "type": "boolean"
+          },
+          "execution_modes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Execution Modes",
+            "type": "array"
           }
         },
         "required": [
-          "per_session_exclusive_submit"
+          "per_session_exclusive_submit",
+          "execution_modes"
         ],
         "title": "GatewayCapabilitiesResult",
         "type": "object"
@@ -32187,6 +32195,36 @@
             ],
             "default": null,
             "title": "Profile"
+          },
+          "execution_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "normal",
+                  "delegate",
+                  "debate"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Execution Mode"
+          },
+          "mode_options": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mode Options"
           },
           "text": {
             "default": "",

@@ -924,6 +924,50 @@ def _invoke_agent(
         _usage_thread.join()
 
 
+def _invoke_debate(
+    sid: str, session: dict, st: _TurnRun, prompt: str, user_text: str, options,
+    *, model_call=None,
+) -> None:
+    """Run bounded read-only sides and commit only the judge's answer.
+
+    No side transcript is published or put in agent history.
+    """
+    from tui_gateway.debate_choreography import run_debate
+    from tui_gateway.external_result_persistence import commit_external_assistant_result
+    from tui_gateway.mode_model_call import call_model
+    from tui_gateway.prompt_execution_modes import DebateOptions
+    if not isinstance(options, DebateOptions) or not isinstance(prompt, str):
+        raise ValueError("Invalid admitted Debate turn")
+    deadline = time.monotonic() + min(240, 30 * (2 * options.rounds + 1) + 15)
+    def cancelled():
+        with session["history_lock"]:
+            return bool(session.get("_turn_cancel_requested") or session.get("_closing")
+                        or not session.get("running"))
+    with _session_profile_runtime_scope(session):
+        answer = run_debate(
+            prompt, options, model_call or call_model,
+            cancelled=cancelled, deadline_exceeded=lambda: time.monotonic() >= deadline)
+    commit_external_assistant_result(
+        sid, session, user_text, answer, history_version=st.history_version)
+    st.result = {"final_response": answer, "messages": list(session["history"])}
+
+
+def _invoke_mode_turn(
+    sid: str, session: dict, st: _TurnRun, execution_spec, prompt: str, run_message: Any, streamer,
+    images: list[str], display_kind: str | None, display_metadata, turn_author, text: Any,
+) -> str | None:
+    """Run one turn under its agent mode; returns the history status note."""
+    if execution_spec is not None and execution_spec.mode == "debate":
+        from tui_gateway.prompt_execution_modes import DebateOptions
+        options = DebateOptions.model_validate(execution_spec.options, strict=True)
+        _invoke_debate(sid, session, st, prompt, text, options)
+        return None  # The external commit already published the durable rows.
+    _invoke_agent(
+        sid, session, st, prompt, run_message, streamer, images, display_kind,
+        display_metadata, turn_author, text)
+    return _absorb_turn_result(sid, session, st, text, display_kind, display_metadata)
+
+
 def _absorb_turn_result(
     sid: str, session: dict, st: _TurnRun, text: Any, display_kind: str | None, display_metadata
 ) -> str | None:
@@ -1204,7 +1248,15 @@ def _run_prompt_submit(
     display_metadata: dict | None = None, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None,
     terminal_callback: Callable[[dict[str, Any]], None] | None = None,
-    turn_author: dict | None = None, report_ownership_refusal: bool = True) -> bool:
+    turn_author: dict | None = None, report_ownership_refusal: bool = True, execution_spec=None) -> bool:
+    from tui_gateway.prompt_execution_modes import require_execution_spec
+    expected_mode = session.get("_execution_mode", "normal")
+    if expected_mode != "normal" or execution_spec is not None:
+        execution_spec = require_execution_spec(execution_spec, expected_mode=expected_mode)
+    if expected_mode == "delegate":
+        raise ValueError("Delegate execution is not installed")
+    if expected_mode == "debate" and (image_paths or not isinstance(text, str)):
+        raise ValueError("Debate accepts text-only turns")
     # Every dispatch binds the session's own row (session_key, real source) before the turn writes:
     # the synthesized turns that enter here directly (crash auto-continue, queued-prompt drain,
     # wake-ups) bypass prompt.submit's persist, and a row-less turn is otherwise materialized by
@@ -1268,11 +1320,9 @@ def _run_prompt_submit(
                     st.receipt_committed = True
                 return
             prompt, run_message, cols, streamer = prepared
-            _invoke_agent(
-                sid, session, st, prompt, run_message, streamer, images, display_kind,
+            status_note = _invoke_mode_turn(
+                sid, session, st, execution_spec, prompt, run_message, streamer, images, display_kind,
                 display_metadata, turn_author, text)
-            status_note = _absorb_turn_result(
-                sid, session, st, text, display_kind, display_metadata)
             payload, raw, status = _complete_turn_payload(session, st, status_note, cols)
             if status == "complete":
                 # Before message.complete: the desktop re-reads the sign-in offer on that event.
@@ -1295,6 +1345,9 @@ def _run_prompt_submit(
                 # A stale interim closure must not fire during a later turn.
                 st.agent.interim_assistant_callback = None
                 with session["history_lock"]:
+                    if execution_spec is not None and session.get("_execution_spec") is execution_spec:
+                        session.pop("_execution_spec", None)  # modes are one-shot per send
+                        session.pop("_execution_mode", None)
                     session["running"] = False
                     session["last_active"] = time.time()
                     session.pop("_turn_user_input", None)  # per turn: never leaks into the next one
