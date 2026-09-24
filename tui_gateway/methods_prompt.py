@@ -951,7 +951,7 @@ def _submit_prompt(rid, params: dict, reservation=None) -> dict:
     # A failed post-commit external-result replay has a durable assistant row
     # but stale warm history. Refuse before staging another submit-time user row;
     # the caller must reopen this session from SQLite.
-    with session["history_lock"]:
+    with session.get("history_lock") or contextlib.nullcontext():
         if session.get("_closing"):
             return _err(rid, 5035, "session is retiring; reconnect to continue")
     from tools.bot_relay import DeliveryAuthor
