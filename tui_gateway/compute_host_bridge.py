@@ -50,7 +50,13 @@ def _get_compute_host_supervisor(cfg: dict | None = None):
 def _compute_host_turn_frame(
     rid: str, sid: str, session: dict, text: Any, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None, display_kind: str | None = None,
-    display_metadata: dict | None = None) -> dict:
+    display_metadata: dict | None = None, execution_spec=None) -> dict:
+    from tui_gateway.prompt_execution_modes import require_execution_spec
+    expected_mode = session.get("_execution_mode", "normal")
+    if execution_spec is None:
+        execution_spec = session.get("_execution_spec")
+    if expected_mode != "normal" or execution_spec is not None:
+        execution_spec = require_execution_spec(execution_spec, expected_mode=expected_mode)
     with session["history_lock"]:
         history = list(session.get("history", []))
         history_version = int(session.get("history_version", 0))
@@ -59,6 +65,8 @@ def _compute_host_turn_frame(
     return {
         "type": "turn.start", "sid": sid, "request_id": rid,
         "session_key": session.get("session_key") or sid, "text": text,
+        **({"execution_mode": expected_mode, "execution_spec": execution_spec.as_wire()}
+           if execution_spec is not None else {}),
         **({"display_kind": display_kind} if display_kind else {}), "history": history,
         **({"display_metadata": display_metadata} if display_metadata else {}),
         "history_version": history_version, "cols": int(session.get("cols", 80) or 80),
@@ -231,6 +239,21 @@ def _apply_compute_host_metadata_mirror(session: dict, frame: dict | None) -> No
 
 
 def _on_compute_host_turn_done(rid: str, sid: str, session: dict, frame: dict) -> None:
+    mode = next((name for name in ("debate", "delegate")
+                 if session.get(f"_compute_host_{name}_commit") is not None), None)
+    if mode is not None:
+        pending_key = f"_compute_host_{mode}_commit"
+        try:
+            if frame.get("type") != "turn.end":
+                raise RuntimeError(str(frame.get("message") or f"isolated {mode.capitalize()} failed"))
+            _commit_isolated_result(sid, session, frame, session[pending_key], mode)
+        except Exception as exc:
+            # A lost or malformed proposal cannot become a successful turn or a warm
+            # context for the next one. Keep the row recoverable in SQLite.
+            session["_closing"] = True
+            frame = {"type": "turn.error", "sid": sid, "message": str(exc)}
+        finally:
+            session.pop(pending_key, None)
     with session["history_lock"]:
         _compute_host_adopt_frame_meta(session, frame)
         session["running"] = False
@@ -250,35 +273,77 @@ def _on_compute_host_turn_done(rid: str, sid: str, session: dict, frame: dict) -
         _emit("session.info", sid, info)
     _drain_queued_prompt(rid, sid, session)
 
+def _commit_isolated_result(sid: str, session: dict, frame: dict, pending: dict, mode: str) -> None:
+    from tui_gateway.external_result_persistence import commit_external_assistant_result
+    result = frame.get(f"{mode}_result")
+    row = session.get("_submit_user_row")
+    if (frame.get("sid") != sid or frame.get("request_id") != pending["turn_id"]
+            or not isinstance(result, dict) or set(result) != {
+                "turn_id", "nonce", "user_row_id", "history_version", "answer"}
+            or result["turn_id"] != pending["turn_id"]
+            or result["nonce"] != pending["nonce"]
+            or type(result["user_row_id"]) is not int
+            or result["user_row_id"] != pending["user_row_id"]
+            or not isinstance(row, dict) or row.get("_row_id") != pending["user_row_id"]
+            or type(result["history_version"]) is not int
+            or result["history_version"] != pending["history_version"]):
+        raise RuntimeError(f"isolated {mode.capitalize()} result does not match admitted turn")
+    if not isinstance(result["answer"], str) or not result["answer"].strip():
+        raise RuntimeError(f"isolated {mode.capitalize()} answer is empty")
+    commit_external_assistant_result(
+        sid, session, pending["text"], result["answer"],
+        history_version=pending["history_version"])
+    # The helper has read back the exact durable rows before returning.
+    _emit("message.complete", sid, {"text": result["answer"], "status": "complete"})
+
 
 def _submit_prompt_to_compute_host(
     rid: str, sid: str, session: dict, text: Any, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None, display_kind: str | None = None,
-    display_metadata: dict | None = None, caller_owns_reservation: bool = False) -> dict:
+    display_metadata: dict | None = None, caller_owns_reservation: bool = False,
+    execution_spec=None) -> dict:
     """Dispatch one turn to the compute host. ``caller_owns_reservation`` says the CALLER already
     holds this turn's registry reservation (``prompt.submit`` locks it in before dispatching) and
     keeps owning it on failure — see the except below."""
     cfg = _load_dashboard_process_isolation_config()
     frame = _compute_host_turn_frame(rid, sid, session, text, image_paths=image_paths,
                                      queued_prompt_generation=queued_prompt_generation,
-                                     display_kind=display_kind, display_metadata=display_metadata)
+                                     display_kind=display_kind, display_metadata=display_metadata,
+                                     execution_spec=execution_spec)
     # Caller JSON-RPC ids may repeat across sockets and turns. Use an opaque
     # dispatch lifetime token, installed before a fast child can send activity.
     turn_id = frame["turn_id"] = frame["request_id"] = uuid.uuid4().hex
+    mode = frame.get("execution_mode")
+    if mode in {"debate", "delegate"}:
+        row = frame.get("submit_user_row")
+        if (not isinstance(row, dict) or type(row.get("_row_id")) is not int
+                or row.get("content") != text or row.get("_db_persisted") is not True
+                or not _active_session_lease_vouch(session)
+                or not session.get("_active_turn_reservation_token")):
+            return _err(rid, 4090, f"isolated {mode.capitalize()} requires a durable admitted parent turn")
+        nonce = frame[f"{mode}_nonce"] = uuid.uuid4().hex
+        session[f"_compute_host_{mode}_commit"] = {
+            "turn_id": turn_id, "nonce": nonce, "user_row_id": row["_row_id"],
+            "history_version": frame["history_version"], "text": text}
     # The REAL lease stays in this parent while the CHILD runs the turn (the child gets an inert
     # borrowed token, see _install_borrowed_lease), so the parent is the only process that can
     # publish this turn to the shared registry. Without it a queued drain routed to the compute
     # host would look idle to another device mid-write.
     if (ownership_refusal := _reserve_session_turn(sid, session)) is not None:
+        if mode in {"debate", "delegate"}:
+            session.pop(f"_compute_host_{mode}_commit", None)
         return _err(rid, 4090, str(ownership_refusal),
                     {"reason": getattr(ownership_refusal, "reason", "") or ""})
     with session["history_lock"]:
         session["_compute_host_turn_id"] = turn_id
         session.pop("_compute_host_activity_ns", None)
+        was_active = bool(session.get("_compute_host_active"))
+        session["_compute_host_active"] = True
 
     def _complete(done: dict) -> None:
-        # submit_turn reports a synchronous pipe failure via the callback before re-raising;
-        # leave the session untouched so prompt.submit can fail open to the in-process path.
+        # submit_turn may report a synchronous pipe failure via callback before
+        # re-raising. The exception handler below quarantines non-Normal turns;
+        # this callback must not also complete or release them.
         if done.get("reason") != "send_failed":
             with session["history_lock"]:
                 if session.get("_compute_host_turn_id") != turn_id:
@@ -290,6 +355,14 @@ def _submit_prompt_to_compute_host(
         _get_compute_host_supervisor(cfg).submit_turn(frame, on_complete=_complete)
     except Exception as exc:
         with session["history_lock"]:
+            if mode in {"debate", "delegate"}:
+                # A write/flush exception does NOT prove the child missed the
+                # frame. An escaped child must never race a restored queue or
+                # inline fallback; only reopening from SQLite can reconcile it.
+                session["_closing"] = True
+                session.pop(f"_compute_host_{mode}_commit", None)
+            if not was_active:
+                session.pop("_compute_host_active", None)
             if session.get("_compute_host_turn_id") == turn_id:
                 session.pop("_compute_host_turn_id", None)
                 session.pop("_compute_host_activity_ns", None)
@@ -306,11 +379,11 @@ def _submit_prompt_to_compute_host(
             _finish_session_turn(sid, session)
         return _err(rid, 5019, f"compute-host dispatch failed: {exc}")
     with session["history_lock"]:
-        session["_compute_host_active"] = True
-        # The accepted child now owns this exact durable row. Keeping it in the
-        # parent would let a later inline turn adopt stale user content.
-        session.pop("_submit_user_row", None)
-        if image_paths is None:
+        # Normal turns hand this row to the child. Isolated modes retain it
+        # until the parent verifies and commits the child's proposal.
+        if mode not in {"debate", "delegate"}:
+            session.pop("_submit_user_row", None)
+        if image_paths is None and mode not in {"debate", "delegate"}:
             session["attached_images"] = []
     return _ok(rid, {"status": "streaming", "turn_isolation": True})
 

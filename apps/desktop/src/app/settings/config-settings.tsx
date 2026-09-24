@@ -11,6 +11,7 @@ import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { isSubmitEnter } from '@/lib/ime'
 import { confirm } from '@/store/confirm'
+import { $activeConnectionId } from '@/store/connections'
 import {
   $dataUrlReadMaxMb,
   clampDataUrlReadMaxMb,
@@ -25,6 +26,7 @@ import { $keepAwake, setKeepAwake } from '@/store/keep-awake'
 import { notify, notifyError } from '@/store/notifications'
 import { normalizeProfileKey } from '@/store/profile'
 import { repoDiscoveryPolicyFromConfig, repoDiscoveryPolicySignature, scanAndRecordRepos } from '@/store/projects'
+import { $settingsScopeProfile } from '@/store/settings-scope'
 import { $settingsRequestProfile } from '@/store/settings-scope'
 import type { ConfigFieldSchema, HermesConfigRecord } from '@/types/hermes'
 
@@ -32,6 +34,7 @@ import { hermesConfigCacheWriter, useHermesConfigRecord } from '../hooks/use-con
 import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
 import { PanelEmpty } from '../overlays/panel'
 
+import { AgentModesSettings } from './agent-modes-settings'
 import { ConfigField } from './config-field'
 import {
   clearsEnabledToolsets,
@@ -90,6 +93,8 @@ function ConfigSettingsInner({
   scopeProfile
 }: ConfigSettingsProps & { scopeProfile: string | undefined }) {
   const { t } = useI18n()
+  const modeProfile = useStore($settingsScopeProfile)
+  const modeConnection = useStore($activeConnectionId)
   const c = t.settings.config
   const keepAwake = useStore($keepAwake)
   const disableF12 = useStore($disableF12)
@@ -388,6 +393,7 @@ function ConfigSettingsInner({
       {activeSectionId === 'model' && (
         <div className="mb-6">
           <ModelSettings onMainModelChanged={onMainModelChanged} scopeProfile={scopeProfile} />
+          <AgentModesSettings connectionId={modeConnection} profile={modeProfile} />
         </div>
       )}
       {/* Device-local desktop prefs (not config.yaml) — they live here since

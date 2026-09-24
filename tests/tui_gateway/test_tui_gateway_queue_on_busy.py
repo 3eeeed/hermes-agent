@@ -9,6 +9,7 @@ policy: redirect the live turn by default, with the legacy interrupt + queue
 path retained as a compatibility fallback.
 """
 
+import pytest
 import threading
 import time
 import types
@@ -510,7 +511,7 @@ def test_busy_steer_fallthrough_burst_drains_all_texts_fifo(monkeypatch):
     monkeypatch.setattr(
         server,
         "_run_prompt_submit",
-        lambda rid, sid, _session, text, **kwargs: dispatched.append(text),
+        lambda rid, sid, _session, text, **kwargs: dispatched.append(text) or True,
     )
     session["running"] = False
     while server._drain_queued_prompt("drain", "sid", session):
@@ -596,7 +597,7 @@ def test_busy_image_prompts_keep_b_and_c_attachments_in_submission_order(monkeyp
     monkeypatch.setattr(
         server,
         "_run_prompt_submit",
-        lambda rid, sid, _session, text, **kwargs: dispatched.append((rid, sid, text, kwargs)),
+        lambda rid, sid, _session, text, **kwargs: dispatched.append((rid, sid, text, kwargs)) or True,
     )
     agent = types.SimpleNamespace(
         _supports_active_turn_redirect=True,
@@ -618,6 +619,9 @@ def test_busy_image_prompts_keep_b_and_c_attachments_in_submission_order(monkeyp
 
         session["running"] = False
         assert server._drain_queued_prompt("drain-b", "sid", session) is True
+        # The mocked runner does not execute its real finally; release its
+        # reservation before admitting the next queued turn.
+        server._finish_session_turn("sid", session)
         session["running"] = False
         assert server._drain_queued_prompt("drain-c", "sid", session) is True
     finally:
@@ -641,11 +645,89 @@ def test_busy_image_prompts_keep_b_and_c_attachments_in_submission_order(monkeyp
 
 # ── _drain_queued_prompt ───────────────────────────────────────────────────
 
+def test_ambiguous_isolated_delegate_queue_dispatch_quarantines_without_retry(monkeypatch):
+    from tui_gateway.prompt_execution_modes import build_execution_spec
+    spec = build_execution_spec("delegate", {
+        "orchestrator": {"provider": "openrouter", "model": "judge"},
+        "workers": [{"lane": "research", "provider": "openrouter", "model": "worker"}],
+        "max_iterations": 2, "permissions": "read-only"})
+    queued = {"text": "do research", "transport": None, "execution_mode": "delegate",
+              "execution_spec": spec, "submit_user_row": {"_row_id": 17, "_db_persisted": True,
+                                                         "role": "user", "content": "do research"}}
+    session = _session(queued_prompt=queued)
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda *a: True)
+    def uncertain(*a, **kw):
+        session["_closing"] = True  # The child may have received a flushed frame.
+        return {"error": {"code": 5019, "message": "ambiguous pipe flush"}}
+    monkeypatch.setattr(server, "_submit_prompt_to_compute_host", uncertain)
+    completed = []
+    monkeypatch.setattr(server, "_emit_terminal_turn_error", lambda *a, **kw: completed.append(a))
+    assert server._drain_queued_prompt("rid", "sid", session) is True
+    assert session.get("queued_prompt") is None
+    assert session["_closing"] is True
+    assert len(completed) == 1
+    assert server._drain_queued_prompt("next", "sid", session) is False
+
+
+@pytest.mark.parametrize("mode,options", [
+    ("debate", {"side_a": {"provider": "openrouter", "model": "a"},
+                "side_b": {"provider": "openrouter", "model": "b"},
+                "judge": {"provider": "openrouter", "model": "judge"}, "rounds": 1}),
+    ("delegate", {"orchestrator": {"provider": "openrouter", "model": "judge"},
+                  "workers": [{"lane": "research", "provider": "openrouter", "model": "worker"}],
+                  "max_iterations": 2, "max_concurrency": 1, "permissions": "read-only"}),
+])
+def test_isolated_mode_queue_drain_passes_original_spec_to_parent_dispatch(monkeypatch, mode, options):
+    from tui_gateway.prompt_execution_modes import build_execution_spec
+    spec = build_execution_spec(mode, options)
+    session = _session(queued_prompt={"text": "work on this", "transport": None,
+                                      "execution_mode": mode, "execution_spec": spec})
+    seen = []
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda *a: True)
+    monkeypatch.setattr(server, "_submit_prompt_to_compute_host", lambda *a, **kw:
+                        seen.append(kw.get("execution_spec")) or {"result": {"status": "streaming"}})
+    assert server._drain_queued_prompt("rid", "sid", session) is True
+    assert seen == [spec]
+
+
+def test_debate_queue_drain_passes_original_spec_to_worker(monkeypatch):
+    from tui_gateway.prompt_execution_modes import build_execution_spec
+    options = {"side_a": {"provider": "openrouter", "model": "a"},
+               "side_b": {"provider": "openrouter", "model": "b"},
+               "judge": {"provider": "openrouter", "model": "judge"}, "rounds": 1}
+    spec = build_execution_spec("debate", options)
+    queued = {"text": "debate this", "transport": None,
+              "execution_mode": "debate", "execution_spec": spec}
+    session = _session(queued_prompt=queued)
+    dispatched = []
+    monkeypatch.setattr(server, "_run_prompt_submit", lambda *a, **kw:
+                        dispatched.append(kw.get("execution_spec")) or True)
+    assert server._drain_queued_prompt("rid", "sid", session) is True
+    assert dispatched == [spec]
+
+
+def test_drain_normal_after_debate_replaces_stale_mode(monkeypatch):
+    from tui_gateway.prompt_execution_modes import build_execution_spec
+    options = {"side_a": {"provider": "openai", "model": "a"},
+               "side_b": {"provider": "openai", "model": "b"},
+               "judge": {"provider": "openai", "model": "judge"}, "rounds": 1}
+    stale = build_execution_spec("debate", options)
+    captured = {}
+    monkeypatch.setattr(server, "_run_prompt_submit", lambda *args, **kwargs:
+                        captured.update(mode=args[2].get("_execution_mode"),
+                                        spec=args[2].get("_execution_spec")))
+    session = _session(queued_prompt={"text": "Normal next", "transport": None},
+                       _execution_mode="debate", _execution_spec=stale)
+    assert server._drain_queued_prompt("r1", "sid", session) is True
+    assert captured["mode"] == "normal"
+    assert captured["spec"].mode == "normal"
+
+
 def test_drain_fires_queued_prompt_and_claims_running(monkeypatch):
     fired = {}
     monkeypatch.setattr(
         server, "_run_prompt_submit",
-        lambda rid, sid, session, text, **kwargs: fired.update(rid=rid, sid=sid, text=text),
+        lambda rid, sid, session, text, **kwargs: fired.update(rid=rid, sid=sid, text=text) or True,
     )
     session = _session(queued_prompt={"text": "go", "transport": "ws-9"})
 
@@ -784,7 +866,9 @@ def test_drain_does_not_clear_stop_after_its_final_generation_check(monkeypatch)
     assert session["running"] is False
 
 
-def test_drain_continues_with_later_queued_prompt_after_dispatch_failure(monkeypatch):
+def test_drain_restores_head_and_leaves_successor_after_dispatch_failure(monkeypatch):
+    # Failure before a worker starts must not skip the accepted head or run its
+    # successor out of order. A later explicit drain/recovery can retry it.
     calls = []
 
     def _run(_rid, _sid, session, text, **_kwargs):
@@ -800,7 +884,8 @@ def test_drain_continues_with_later_queued_prompt_after_dispatch_failure(monkeyp
     )
 
     assert server._drain_queued_prompt("r1", "sid", session) is True
-    assert calls == ["broken", "next"]
-    assert session["queued_prompt"] is None
-    assert session.get("queued_prompts") is None
+    assert calls == ["broken"]
+    assert session["queued_prompt"]["text"] == "broken"
+    assert session["queued_prompts"][0]["text"] == "next"
+    assert session["running"] is False
 

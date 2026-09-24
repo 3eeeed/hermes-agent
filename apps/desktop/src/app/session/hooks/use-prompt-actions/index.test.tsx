@@ -433,6 +433,17 @@ function renderedSeedTexts(seeds: Record<string, unknown>[]): string[] {
 }
 
 // The HUD floats over the app the user is really working in, so the gateway
+it('forwards an explicit native mode snapshot in the immutable prompt payload', async () => {
+  const requestGateway = vi.fn(async () => ({} as never))
+  let handle: HarnessHandle | null = null
+  await actRender(<Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+  await handle!.submitText('compare', { modePayload: { execution_mode: 'debate', mode_options: { rounds: 1 } } })
+  expect(requestGateway).toHaveBeenCalledWith('prompt.submit', expect.objectContaining({
+    execution_mode: 'debate', mode_options: { rounds: 1 }
+  }), expect.anything())
+})
+
+// The HUD floats over the app the user is really working in, so the gateway
 // turns this flag into a per-turn hint: read the window underneath and work in
 // it, rather than reaching for Hermes's own browser and panes.
 describe('usePromptActions HUD surface', () => {
@@ -5974,6 +5985,7 @@ describe('usePromptActions live-owner refusal (#106217)', () => {
     $pendingSessionMoves.set({})
 
     const calls: string[] = []
+
     const requestGateway = vi.fn(async (method: string, params?: unknown) => {
       calls.push(method)
 
@@ -6307,6 +6319,7 @@ describe('usePromptActions live-owner refusal (#106217)', () => {
     const oldTree = await actRender(
       <Harness onReady={() => undefined} refreshSessions={async () => undefined} requestGateway={gateway(callsOld)} />
     )
+
     await actRender(
       <Harness onReady={() => undefined} refreshSessions={async () => undefined} requestGateway={gateway(callsNew)} />
     )
@@ -6628,6 +6641,7 @@ describe('usePromptActions live-owner refusal (#106217)', () => {
       const { latest } = await refusedImageSend(gateway)
 
       const refusedRows = latest()
+
       const thisCard = refusedRows.find(
         row => row.errorSurface?.code === 'SESSION_NOT_OWNED' && row.id !== HISTORICAL_CARD.id
       )!

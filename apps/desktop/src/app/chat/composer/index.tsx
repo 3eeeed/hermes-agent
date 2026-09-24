@@ -18,11 +18,13 @@ import { triggerHaptic } from '@/lib/haptics'
 import { useStoreSelector, useStoresSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { interceptsTypedVoiceStop } from '@/lib/voice-stop-word'
+import { modePayload, modeScopeKey, selectedMode } from '@/store/agent-modes'
 import { sessionCompacting } from '@/store/compaction'
 import { browseBackward, browseForward, deriveUserHistory, isBrowsingHistory } from '@/store/composer-input-history'
 import { POPOUT_WIDTH_REM } from '@/store/composer-popout'
 import { parkQueuedPrompts, removeQueuedPrompt, unparkQueuedPrompts } from '@/store/composer-queue'
 import { $hudMode } from '@/store/hud'
+import { notifyError } from '@/store/notifications'
 import { sessionBlockingPrompt } from '@/store/prompts'
 import { toggleReview } from '@/store/review'
 import { $gatewayState } from '@/store/session'
@@ -101,6 +103,7 @@ import { VoiceActivity, VoicePlaybackActivity } from './voice-activity'
 
 export function ChatBar({
   busy,
+  modeOwner,
   cwd,
   disabled,
   focusKey,
@@ -138,12 +141,31 @@ export function ChatBar({
   // end control. Populated after useComposerVoice below (the submit wrapper
   // is created first); render-time assignment keeps the ref current.
   const voiceStopRef = useRef<{ active: boolean; end: () => void }>({ active: false, end: () => {} })
+  const modeConnectionId = modeOwner?.connectionId
+  const modeProfile = modeOwner?.profile
 
   // Every send (typed, queued, voice) passes through the contributed
   // middleware chain first — rewrite / pass-through / cancel. Empty chain =
   // exact pass-through, so surfaces without contributions are byte-identical.
   const onSubmit = useCallback<ChatBarProps['onSubmit']>(
     async (value, options) => {
+      let modeSnapshot: { execution_mode: 'delegate' | 'debate'; mode_options: Record<string, unknown> } | undefined
+
+      if (modeProfile && !options?.replayPayload) {
+        try {
+          const scope = modeScopeKey(modeConnectionId ?? null, modeProfile)
+          const choice = selectedMode(scope)
+
+          if (choice !== 'normal') {
+            modeSnapshot = modePayload(scope, choice) as NonNullable<typeof modeSnapshot>
+          }
+        } catch (error) {
+          notifyError(error, 'This agent mode is unavailable. Your draft was not sent.')
+
+          return false
+        }
+      }
+
       // Bare stop phrase typed while the voice conversation is live: end the
       // conversation (mic off, pill dismissed) instead of sending "stop" to
       // the agent. Spoken transcripts are already stop-checked inside
@@ -165,9 +187,9 @@ export function ChatBar({
         return false
       }
 
-      return onSubmitProp(draft.text, { ...options, attachments: draft.attachments })
+      return onSubmitProp(draft.text, { ...options, attachments: draft.attachments, ...(modeSnapshot && { modePayload: modeSnapshot }) })
     },
-    [onSubmitProp]
+    [onSubmitProp, modeConnectionId, modeProfile]
   )
 
   // Which live composer this instance IS (main | tile) — its attachment set,
@@ -1110,6 +1132,7 @@ export function ChatBar({
       hasComposerPayload={hasComposerPayload}
       hideModelPill={guidedChat}
       minimal={minimal}
+      modeOwner={modeOwner}
       onDictate={dictate}
       onQueue={queueDraft}
       onToggleAutoSpeak={handleToggleAutoSpeak}
@@ -1146,6 +1169,7 @@ export function ChatBar({
           // guard forever (#44135). Clear unconditionally: by the time blur
           // runs there is nothing left composing in this editor.
           composingRef.current = false
+
           if (blurCloseTimer.current !== null) {
             window.clearTimeout(blurCloseTimer.current)
           }

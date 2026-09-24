@@ -504,10 +504,24 @@ def _persist_session_row_for_submit(
 
 
 def _run_after_agent_ready(
-    rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None
+    rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None,
+    execution_spec=None,
 ):
     """Turn thread body: patient wait for a deferred build (a slow build must not eat the
     accepted in-flight message), then run."""
+    from tui_gateway.prompt_execution_modes import require_execution_spec
+    expected_mode = session.get("_execution_mode", "normal")
+    if expected_mode != "normal" or execution_spec is not None:
+        try:
+            require_execution_spec(execution_spec, expected_mode=expected_mode)
+        except ValueError as exc:
+            _emit_terminal_turn_error(sid, session, str(exc))
+            with session["history_lock"]:
+                session["running"] = False
+            _finish_session_turn(sid, session)
+            return
+    # The validated execution spec travels unchanged through the deferred wait.
+    # Per-session Delegate restrictions were checked before the user row was staged.
     # The wait delivers the prompt when the still-running build completes, honors a cancel promptly, notices
     # the user once past the slow threshold, and only errors when the build itself fails or the bounded cap
     # expires. See #63078.
@@ -543,7 +557,8 @@ def _run_after_agent_ready(
         return
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
-        terminal_callback=hosted_terminal_callback, turn_author=turn_author)
+        terminal_callback=hosted_terminal_callback, turn_author=turn_author,
+        execution_spec=execution_spec)
 
 
 _TRUNCATION_PARAMS = (
@@ -906,6 +921,11 @@ def _(rid, params: dict) -> dict:
 
 
 def _submit_prompt(rid, params: dict, reservation=None) -> dict:
+    from tui_gateway.prompt_execution_modes import admission_error, build_execution_spec
+    mode_error = admission_error(params.get("execution_mode"), params.get("mode_options"))
+    if mode_error is not None:
+        return _err(rid, 4126, mode_error)
+    execution_spec = build_execution_spec(params.get("execution_mode"), params.get("mode_options"))
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
     sid = params.get("session_id", "")
     raw_text = params.get("text", "")
@@ -928,6 +948,12 @@ def _submit_prompt(rid, params: dict, reservation=None) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    # A failed post-commit external-result replay has a durable assistant row
+    # but stale warm history. Refuse before staging another submit-time user row;
+    # the caller must reopen this session from SQLite.
+    with session["history_lock"]:
+        if session.get("_closing"):
+            return _err(rid, 5035, "session is retiring; reconnect to continue")
     from tools.bot_relay import DeliveryAuthor
 
     # Only the relay handler can build a DeliveryAuthor. A dict here is a client claiming a sender.
@@ -964,6 +990,20 @@ def _submit_prompt(rid, params: dict, reservation=None) -> dict:
         # `/work fix it` sends nine literal chars.
         text = _expand_skill_invocation_for_replay(text, str(session.get("session_key") or ""))
     turn_isolation = _session_uses_compute_host(session, _load_dashboard_process_isolation_config())
+    if execution_spec.mode == "delegate":
+        # Both inline and isolated Delegate commits are owned by the parent;
+        # the child may propose but never write an assistant row.
+        opts = execution_spec.options
+        if (not isinstance(text, str) or session.get("attached_images")
+                or not isinstance(opts.get("orchestrator"), dict)
+                or opts["orchestrator"].get("effort") is not None
+                or any(worker.get("effort") is not None for worker in opts["workers"])):
+            return _err(rid, 4126, "Delegate mode is unavailable for this session or options")
+    if execution_spec.mode == "debate" and (
+            not isinstance(text, str) or session.get("attached_images")):
+        return _err(rid, 4126, "Debate mode does not accept image turns")
+    if execution_spec.mode in {"debate", "delegate"} and turn_isolation and not _active_session_lease_vouch(session):
+        return _err(rid, 4126, f"{execution_spec.mode.capitalize()} mode is unavailable without a real parent session lease")
     if internal_hosted_submit and turn_isolation:
         return _err(rid, 4121, "hosted room turns do not support isolated compute workers yet")
     # Re-bind to the current transport: streaming must stay on the active websocket even
@@ -981,6 +1021,8 @@ def _submit_prompt(rid, params: dict, reservation=None) -> dict:
     # prompt in a queue whose drain already ran.
     while True:
         with session["history_lock"]:
+            if session.get("_closing"):
+                return _err(rid, 5035, "session is retiring; reconnect to continue")
             if not session.get("running"):
                 break
             if internal_hosted_submit:
@@ -1006,7 +1048,7 @@ def _submit_prompt(rid, params: dict, reservation=None) -> dict:
             rid, sid, session, text, busy_transport, queued=bool(params.get("queued")),
             turn_author=turn_author,
             accept_send=None if reservation is None else reservation.accept,
-            submit_user_row=queued_submit_user_row)
+            submit_user_row=queued_submit_user_row, execution_spec=execution_spec)
         if busy_response is not None:
             return busy_response
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
@@ -1017,6 +1059,9 @@ def _submit_prompt(rid, params: dict, reservation=None) -> dict:
         rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
     if err is not None:
         return err
+    with session["history_lock"]:
+        session["_execution_spec"] = execution_spec
+        session["_execution_mode"] = execution_spec.mode
     if (err := _persist_session_row_for_submit(
             rid, session, text, display_kind,
             reservation=(reservation if reservation is None or not reservation.accepted else None))) is not None:
@@ -1049,13 +1094,27 @@ def _submit_prompt(rid, params: dict, reservation=None) -> dict:
                          turn_author.get("id"))
         isolated_response = _submit_prompt_to_compute_host(
             rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
-            caller_owns_reservation=True)
+            caller_owns_reservation=True, execution_spec=execution_spec)
         if not isolated_response.get("error"):
             isolated_response["result"].update(survivor_fields)
             return isolated_response
         logger.warning(
-            "compute-host dispatch failed for session %s; falling back inline: %s", sid,
+            "compute-host dispatch failed for session %s%s: %s", sid,
+            "; falling back inline" if execution_spec.mode == "normal" else f"; refusing {execution_spec.mode} fallback",
             isolated_response["error"].get("message", "unknown error"))
+        if execution_spec.mode != "normal":
+            # An escaped child may still spend tokens, but it can no longer
+            # commit without this parent's correlated result. Never run an
+            # inline fallback for an isolated non-Normal send already accepted.
+            with session["history_lock"]:
+                session["_closing"] = True
+                session["running"] = False
+                session.pop("_submit_user_row", None)
+            _emit_terminal_turn_error(
+                sid, session, f"Isolated {execution_spec.mode.capitalize()} dispatch failed; reopen this chat before retrying",
+                error_surface={"layer": "runtime", "code": f"{execution_spec.mode}_dispatch_failed", "retryable": False})
+            _finish_session_turn(sid, session)
+            return _ok(rid, accepted_result)
         # The child never started. The parent still owns the exact submit-time
         # row staged above, so the inline fallback adopts it without a second
         # transcript append.
@@ -1070,7 +1129,8 @@ def _submit_prompt(rid, params: dict, reservation=None) -> dict:
             _start_agent_build(sid, session)
         run_thread = threading.Thread(
             target=lambda: _run_after_agent_ready(
-                rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author),
+                rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback,
+                turn_author, execution_spec),
             daemon=True)
         # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
         session["_run_thread"] = run_thread

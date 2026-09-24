@@ -35,6 +35,7 @@ import { stableArray } from '@/lib/stable-array'
 import { readJson, writeJson } from '@/lib/storage'
 import type { SessionInfo } from '@/types/hermes'
 
+import { dropModePreferences, migrateModePreferences } from './agent-modes'
 import { $activeGatewayProfile, normalizeProfileKey } from './profile'
 import { clearAllProviderWaits, clearSessionProviderWait } from './provider-wait'
 import {
@@ -2019,6 +2020,7 @@ export function dropTilesForProfile(
     $sessionTiles.set(next)
   }
 
+  dropModePreferences(name, routeConnection || 'local')
   persistTiles()
 }
 
@@ -2078,6 +2080,7 @@ export function migrateTilesForProfile(oldProfile: string, newProfile: string): 
   migrateTranscriptTailsForProfile(from, to)
   migrateRememberedNavigationForProfile(from, to)
   migrateSessionOwnerHintsForProfile(from, to)
+  migrateModePreferences(from, to)
 }
 
 /** ⌘⇧T — reopen the most recently closed tab where it was, then focus it.

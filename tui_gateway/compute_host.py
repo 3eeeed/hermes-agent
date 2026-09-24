@@ -217,6 +217,19 @@ class ComputeHost:
             self._reply("turn.error", sid, request_id, message="sid required")
             return
         try:
+            from tui_gateway.prompt_execution_modes import require_execution_spec
+            expected_mode = frame.get("execution_mode", "normal")
+            if expected_mode != "normal":
+                spec = require_execution_spec(frame.get("execution_spec"), expected_mode=expected_mode)
+                if expected_mode == "debate":
+                    self._run_isolated_debate(frame, spec)
+                    return
+                if expected_mode == "delegate":
+                    self._run_isolated_delegate(frame, spec)
+                    return
+                raise ValueError(f"{expected_mode.capitalize()} mode is unavailable in compute host")
+            if frame.get("execution_spec") is not None:
+                require_execution_spec(frame["execution_spec"], expected_mode="normal")
             from tui_gateway import server
             session = self._ensure_server_session(server, frame)
             if isinstance(frame.get("submit_user_row"), dict):
@@ -277,9 +290,82 @@ class ComputeHost:
                 session = server._sessions.get(sid)
                 if session is not None:
                     with session.get("history_lock", threading.Lock()):
-                        session["running"] = False
-                        server._clear_inflight_turn(session)
+                        mode = frame.get("execution_mode")
+                        if (mode not in {"debate", "delegate"}
+                                or session.get(f"_isolated_{mode}_turn_id") == request_id):
+                            session["running"] = False
+                            server._clear_inflight_turn(session)
             self._reply("turn.error", sid, request_id, reason="exception", message=str(exc))
+
+    def _run_isolated_debate(self, frame: dict[str, Any], spec: Any) -> None:
+        """Compute a proposal only. The parent alone owns SQLite and completion."""
+        from tui_gateway.debate_choreography import run_debate
+        from tui_gateway.mode_model_call import call_model
+        from tui_gateway.prompt_execution_modes import DebateOptions
+        options = DebateOptions.model_validate(spec.options, strict=True)
+        deadline = time.monotonic() + min(240, 30 * (2 * options.rounds + 1) + 15)
+        self._run_isolated_proposal(frame, "debate", lambda session, cancelled: run_debate(
+            frame["text"], options, call_model, cancelled=cancelled,
+            deadline_exceeded=lambda: time.monotonic() >= deadline))
+
+    def _run_isolated_delegate(self, frame: dict[str, Any], spec: Any) -> None:
+        """Execute real read-only children; the answer is still only a proposal."""
+        from tui_gateway.delegate_readonly_lifecycle import run_readonly_delegate_answer
+        def produce(session: dict, cancelled: Any) -> str:
+            if cancelled():
+                raise RuntimeError("isolated Delegate cancelled")
+            answer, _children = run_readonly_delegate_answer(
+                session["agent"], frame["text"], spec.options,
+                profile_home=session.get("profile_home"), cancelled=cancelled)
+            return answer
+        self._run_isolated_proposal(frame, "delegate", produce)
+
+    def _run_isolated_proposal(self, frame: dict[str, Any], mode: str, produce: Any) -> None:
+        from tui_gateway import server
+        sid, turn_id = frame["sid"], frame["request_id"]
+        row = frame.get("submit_user_row")
+        vouch = frame.get("active_session_lease")
+        if (not isinstance(row, dict) or type(row.get("_row_id")) is not int
+                or row.get("_db_persisted") is not True or row.get("content") != frame.get("text")
+                or not isinstance(vouch, dict) or not vouch.get("lease_id")
+                or vouch.get("session_id") != frame.get("session_key")
+                or not isinstance(frame.get(f"{mode}_nonce"), str)
+                or not frame[f"{mode}_nonce"] or frame.get("turn_id") != turn_id
+                or type(frame.get("history_version")) is not int):
+            raise RuntimeError(f"isolated {mode.capitalize()} unavailable without admitted parent proof")
+        session = self._ensure_server_session(server, frame)
+        server._install_borrowed_lease(sid, session, frame)
+        with session["history_lock"]:
+            if session.get("running"):
+                raise RuntimeError("session busy")
+            session["running"] = True
+            session[f"_isolated_{mode}_turn_id"] = turn_id
+            session["_turn_cancel_requested"] = False
+        self._reply("turn.started", sid, turn_id, started_ns=now_ns())
+        try:
+            def cancelled() -> bool:
+                with session["history_lock"]:
+                    return bool(session.get("_turn_cancel_requested") or session.get("_closing"))
+            with server._session_profile_runtime_scope(session):
+                answer = produce(session, cancelled)
+            if cancelled():
+                raise RuntimeError(f"isolated {mode.capitalize()} cancelled")
+            # Publishing turn.end lets the parent commit and immediately send
+            # the next turn. Retire our running claim BEFORE that callback can
+            # replay its newer history into this child.
+            with session["history_lock"]:
+                if session.get(f"_isolated_{mode}_turn_id") == turn_id:
+                    session["running"] = False
+                    session.pop(f"_isolated_{mode}_turn_id", None)
+            self._reply("turn.end", sid, turn_id, ended_ns=now_ns(), **{f"{mode}_result": {
+                "turn_id": turn_id, "nonce": frame[f"{mode}_nonce"],
+                "user_row_id": row["_row_id"], "history_version": frame["history_version"],
+                "answer": answer}})
+        finally:
+            with session["history_lock"]:
+                if session.get(f"_isolated_{mode}_turn_id") == turn_id:
+                    session["running"] = False
+                    session.pop(f"_isolated_{mode}_turn_id", None)
 
     def _emit_turn_activity(self, sid: str, session: dict, turn_id: str, started_at: float) -> None:
         # Observe the agent clock, never the host heartbeat. A reused agent's last
@@ -302,6 +388,19 @@ class ComputeHost:
         sid = str(frame.get("sid") or "")
         session = server._sessions.get(sid)
         if session is not None:
+            incoming_version = frame.get("history_version")
+            if (type(incoming_version) is int and isinstance(frame.get("history"), list)
+                    and frame.get("session_key") == session.get("session_key")
+                    and incoming_version > int(session.get("history_version", 0))):
+                # Parent committed an external answer while this child held only an
+                # inert lease. Never let a subsequent normal turn use stale context.
+                with session["history_lock"]:
+                    if session.get("running"):
+                        raise RuntimeError("session busy during external history replay")
+                    history = list(frame["history"])
+                    session["agent"]._session_messages = history
+                    session["history"] = history
+                    session["history_version"] = incoming_version
             session["transport"] = self._transport
             if frame.get("cols") is not None:
                 session["cols"] = int(frame.get("cols") or 80)

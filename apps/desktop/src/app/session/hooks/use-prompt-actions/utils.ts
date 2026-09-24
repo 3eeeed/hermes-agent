@@ -712,6 +712,8 @@ export function visibleUserIndexAtOrdinal(messages: readonly ChatMessage[], targ
 }
 
 export interface SubmitTextOptions {
+  /** Immutable native execution choice captured at composer dispatch. Omitted for Normal. */
+  modePayload?: { execution_mode: 'delegate' | 'debate'; mode_options: Record<string, unknown> }
   attachments?: ComposerAttachment[]
   /** Immutable per-message id forwarded to the gateway as `client_send_id`. A retry
    *  carrying the same id is answered with the acceptance already given instead of

@@ -176,6 +176,9 @@ def _build_child_agent(
     # callers such as /review pass auxiliary.review here so fallback policy is
     # not accidentally read from the general delegation block.
     routing_cfg: Optional[Dict[str, Any]] = None,
+    # Gateway-only read-only mode; defaults preserve delegate_task behavior.
+    strict_route: bool = False,
+    force_leaf: bool = False,
     # Legacy; accepted for wire compat but ignored (capability is depth-derived).
     role: str = "leaf",
 ):
@@ -188,7 +191,7 @@ def _build_child_agent(
     # depth budget remains below max_spawn_depth. The `role` arg is ignored.
     child_depth = getattr(parent_agent, "_delegate_depth", 0) + 1
     max_spawn = _get_max_spawn_depth()
-    effective_role = "orchestrator" if _get_orchestrator_enabled() and child_depth < max_spawn else "leaf"
+    effective_role = "orchestrator" if not force_leaf and _get_orchestrator_enabled() and child_depth < max_spawn else "leaf"
 
     # One subagent_id shared by the progress callback, spawn_requested event and
     # the live registry; parent_id is set when THIS parent is itself a subagent.
@@ -200,6 +203,15 @@ def _build_child_agent(
     # as auxiliary.review.
     delegation_cfg = _load_config()
     child_toolsets, child_disabled_toolsets = _resolve_child_toolsets(parent_agent, toolsets, effective_role)
+    if strict_route:
+        if not force_leaf or effective_role != "leaf":
+            raise ValueError("Strict child must be a leaf")
+        if not override_provider or not override_base_url or not override_api_key or not model:
+            raise ValueError("Strict child route requires explicit provider, endpoint, key and model")
+        if child_toolsets != ["web"]:
+            raise ValueError("Strict child requires exactly the web read-only toolset")
+        if not isinstance(routing_cfg, dict) or routing_cfg.get("fallback_providers") != []:
+            raise ValueError("Strict child forbids fallback routes")
     child_prompt = _build_child_system_prompt(
         goal, context, workspace_path=_resolve_workspace_hint(parent_agent), role=effective_role,
         max_spawn_depth=max_spawn, child_depth=child_depth,
@@ -234,7 +246,7 @@ def _build_child_agent(
     with delegated_child_context():
         try:
             child = AIAgent(
-                **rt, max_iterations=max_iterations, prefill_messages=getattr(parent_agent, "prefill_messages", None),
+                **rt, max_iterations=max_iterations, prefill_messages=(None if strict_route else getattr(parent_agent, "prefill_messages", None)),
                 enabled_toolsets=child_toolsets, disabled_toolsets=child_disabled_toolsets, quiet_mode=True,
                 ephemeral_system_prompt=child_prompt, log_prefix=f"[subagent-{task_index}]", platform="subagent",
                 skip_context_files=True, skip_memory=True, clarify_callback=None,
@@ -275,7 +287,9 @@ def _build_child_agent(
     if parent_sid and getattr(child, "_session_init_model_config", None) is not None:
         child._session_init_model_config["_delegate_from"] = parent_sid
     # Shared pool lets children rotate credentials on rate limits.
-    child_pool = _resolve_child_credential_pool(rt["provider"], parent_agent, rt["base_url"])
+    child_pool = None if strict_route else _resolve_child_credential_pool(rt["provider"], parent_agent, rt["base_url"])
+    if strict_route:
+        child._credential_pool = None
     if child_pool is not None:
         child._credential_pool = child_pool
 

@@ -127,10 +127,19 @@ class SessionExportTooLargeError(ValueError):
 
 
 def _compression_lock_holder_process_is_dead(holder: str) -> bool:
-    """True only when a ``pid=<n>`` lock holder's local PID is provably gone.
+    """True only when a holder's local PID is provably gone.
+    Host-qualified holders are probed only if their stable host identity matches
+    this kernel. Legacy unqualified holders retain their existing local-PID rule.
     Reclaim on kernel proof only: unstructured/same-process holders (another
     thread's live lease) and any probe doubt keep the lease until TTL expiry
     (PID reuse must never steal a live lease; a wrongly-kept one self-heals)."""
+    # Host-qualified holders may be shared across machines. A PID absent here is
+    # proof only for this kernel; unknown or conflicting host tokens fail closed.
+    hosts = [part[5:] for part in (holder or "").split(":") if part.startswith("host=")]
+    if hosts:
+        from hermes_state_send_ledger import prompt_send_host_identity
+        if len(hosts) != 1 or hosts[0] != prompt_send_host_identity():
+            return False
     match = re.search(r"(?:^|:)pid=(\d+)(?::|$)", holder or "")
     pid = int(match.group(1)) if match else 0
     if pid <= 0 or pid == os.getpid():

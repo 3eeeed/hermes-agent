@@ -59,7 +59,7 @@ export interface SessionOwnership {
  * `title_preview` has been emptied. Hence this is captured once, at the refusal,
  * and replayed verbatim.
  */
-export type PromptSubmitPayload = Readonly<Record<string, boolean | number | readonly number[] | string>>
+export type PromptSubmitPayload = Readonly<Record<string, boolean | number | readonly number[] | string | Record<string, unknown>>>
 
 /** A send the fence refused, kept whole so the move can finish it. */
 export interface PendingSessionMove {
@@ -182,6 +182,7 @@ export function rememberRefusedSend(pending: RefusedSend): void {
     attemptId: pending.attemptId || mintId('attempt'),
     sendId: pending.sendId || mintId('send')
   }
+
   const queue = $pendingSessionMoves.get()[pending.storedSessionId] ?? []
   const existing = queue.findIndex(entry => entry.attemptId === attempt.attemptId)
 
@@ -221,6 +222,7 @@ export function rememberInFlightSend(runtimeId: string, pending: RefusedSend): n
     attemptId: pending.attemptId || mintId('attempt'),
     sendId: pending.sendId || mintId('send')
   }
+
   const queue = inFlightSends.get(runtimeId) ?? []
 
   inFlightSends.set(runtimeId, [...queue, attempt])
@@ -368,9 +370,11 @@ export function pendingSessionMove(storedSessionId: null | string | undefined): 
  *  the user's next message must not delete a message it never saw. */
 export function forgetSessionMoveAttempts(storedSessionId: string, attemptIds: readonly string[]): void {
   const sent = new Set(attemptIds)
+
   for (const attemptId of sent) {
     claimedForRetry.delete(attemptId)
   }
+
   const queue = $pendingSessionMoves.get()[storedSessionId]
 
   if (!queue?.some(entry => sent.has(entry.attemptId))) {
@@ -539,6 +543,7 @@ export async function moveSessionHere(storedSessionId: string): Promise<SessionM
           runtimeId: queued[queued.length - 1].runtimeId,
           storedSessionId
         })
+
         for (const attempt of queued) {
           claimedForRetry.add(attempt.attemptId)
         }
