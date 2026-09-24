@@ -16,9 +16,14 @@ class ModeModelCallError(RuntimeError):
 
 
 _MAX_OUTPUT_CHARS = 8_000
-ADVISORY_SYSTEM_PROMPT = ("You are one role inside the Hermes assistant's multi-model answer. Your text may be shown "
-                         "to the user as Hermes' reply in an ongoing conversation: use the recent conversation, "
-                         "answer in the user's language, and do not call tools or describe yourself or your limits.")
+ADVISORY_SYSTEM_PROMPT = (
+    "You are one voice inside Hermes, the user's AI agent, answering one turn of an ongoing "
+    "conversation. The actions described in the recent conversation were really performed by "
+    "Hermes with its tools in earlier turns; treat them as real. In this turn you have no tools: "
+    "reason, advise and answer from the conversation. Reply in the user's language and style. "
+    "Never describe yourself as a plain language model, never disclaim the conversation, and "
+    "never say you cannot act on the user's systems; if action is needed, say what Hermes will do next."
+)
 _TIMEOUT_SECONDS = 30.0
 
 
