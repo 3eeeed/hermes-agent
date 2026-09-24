@@ -843,9 +843,11 @@ def _invoke_delegate(sid: str, session: dict, st: _TurnRun, prompt: str,
             return bool(session.get("_turn_cancel_requested") or session.get("_closing"))
     if cancelled():
         raise RuntimeError("Delegate cancelled before worker dispatch")
+    from tui_gateway.mode_context import conversation_excerpt
     answer, _workers = run_readonly_delegate_answer(
         st.agent, prompt, options.model_dump(mode="json"),
-        profile_home=session.get("profile_home"), cancelled=cancelled)
+        profile_home=session.get("profile_home"), cancelled=cancelled,
+        context=conversation_excerpt(getattr(st, "history", None), prompt))
     # An interrupt may arrive while children are running. Child completion is
     # not permission to publish into a cancelled/superseded parent turn.
     commit_external_assistant_result(
@@ -873,9 +875,11 @@ def _invoke_debate(
         with session["history_lock"]:
             return bool(session.get("_turn_cancel_requested") or session.get("_closing")
                         or not session.get("running"))
+    from tui_gateway.mode_context import conversation_excerpt
     answer = run_debate(
         prompt, options, model_call or call_model,
-        cancelled=cancelled, deadline_exceeded=lambda: time.monotonic() >= deadline)
+        cancelled=cancelled, deadline_exceeded=lambda: time.monotonic() >= deadline,
+        context=conversation_excerpt(getattr(st, "history", None), prompt))
     commit_external_assistant_result(
         sid, session, user_text, answer, history_version=st.history_version)
     st.result = {"final_response": answer, "messages": list(session["history"])}

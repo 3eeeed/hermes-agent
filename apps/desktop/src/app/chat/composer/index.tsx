@@ -18,7 +18,7 @@ import { triggerHaptic } from '@/lib/haptics'
 import { useStoreSelector, useStoresSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { interceptsTypedVoiceStop } from '@/lib/voice-stop-word'
-import { modePayload, modeScopeKey, selectedMode } from '@/store/agent-modes'
+import { modePayload, modeScopeKey, selectedMode, sendOnceWithMode } from '@/store/agent-modes'
 import { sessionCompacting } from '@/store/compaction'
 import { browseBackward, browseForward, deriveUserHistory, isBrowsingHistory } from '@/store/composer-input-history'
 import { POPOUT_WIDTH_REM } from '@/store/composer-popout'
@@ -150,6 +150,7 @@ export function ChatBar({
   const onSubmit = useCallback<ChatBarProps['onSubmit']>(
     async (value, options) => {
       let modeSnapshot: { execution_mode: 'delegate' | 'debate'; mode_options: Record<string, unknown> } | undefined
+      let modeScope: string | undefined
 
       if (modeProfile && !options?.replayPayload) {
         try {
@@ -158,6 +159,7 @@ export function ChatBar({
 
           if (choice !== 'normal') {
             modeSnapshot = modePayload(scope, choice) as NonNullable<typeof modeSnapshot>
+            modeScope = scope
           }
         } catch (error) {
           notifyError(error, 'This agent mode is unavailable. Your draft was not sent.')
@@ -187,7 +189,13 @@ export function ChatBar({
         return false
       }
 
-      return onSubmitProp(draft.text, { ...options, attachments: draft.attachments, ...(modeSnapshot && { modePayload: modeSnapshot }) })
+      return sendOnceWithMode(modeScope, () =>
+        onSubmitProp(draft.text, {
+          ...options,
+          attachments: draft.attachments,
+          ...(modeSnapshot && { modePayload: modeSnapshot })
+        })
+      )
     },
     [onSubmitProp, modeConnectionId, modeProfile]
   )

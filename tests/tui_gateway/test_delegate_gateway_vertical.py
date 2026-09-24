@@ -69,7 +69,7 @@ def test_delegate_submit_commits_one_orchestrated_answer(monkeypatch, tmp_path, 
     monkeypatch.setattr(server, "_after_complete_turn", lambda *a: None)
     monkeypatch.setattr(server, "_publish_session_control_snapshot", lambda *a, **kw: None)
     monkeypatch.setattr(server, "_emit_settled_session_info", lambda *a: None)
-    def real_children(parent, prompt, options, *, profile_home, cancelled):
+    def real_children(parent, prompt, options, *, profile_home, cancelled, context=""):
         assert not cancelled()
         called.append((parent, prompt, options, profile_home))
         return "Orchestrated answer.", [{"status": "completed", "summary": "research"}]

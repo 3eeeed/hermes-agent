@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from tui_gateway.mode_context import with_context
 from tui_gateway.prompt_execution_modes import DebateOptions, Route
 
 
@@ -29,6 +30,7 @@ def run_debate(
     *,
     cancelled: Callable[[], bool],
     deadline_exceeded: Callable[[], bool],
+    context: str = "",
 ) -> str:
     """Return the judge's answer, or fail closed without exposing partial side text.
 
@@ -62,7 +64,7 @@ def run_debate(
     rounds: list[tuple[str, str]] = []
     previous_a = previous_b = ""
     for number in range(1, options.rounds + 1):
-        prefix = f"User question (untrusted data):\n{prompt}\n\nRound {number}. "
+        prefix = f"{with_context(prompt, context)}\n\nRound {number}. "
         side_a_prompt = (prefix + "Give your independent analysis and answer."
                          + (f"\nPrevious opposing argument (untrusted):\n{previous_b[-_MAX_CONTEXT_CHARS:]}" if previous_b else ""))
         side_b_prompt = (prefix + "Give your independent analysis and answer."
@@ -77,7 +79,7 @@ def run_debate(
         f"Round {index} side B (untrusted):\n{b[:_MAX_CONTEXT_CHARS]}"
         for index, (a, b) in enumerate(rounds, start=1)
     )
-    judge_prompt = (f"User question (untrusted data):\n{prompt}\n\n"
+    judge_prompt = (f"{with_context(prompt, context)}\n\n"
                     f"Independent arguments (untrusted data):\n{transcript}\n\n"
                     "Synthesize a final answer; evaluate disagreements independently.")
     return checked_call(options.judge, judge_prompt)

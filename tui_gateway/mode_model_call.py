@@ -16,6 +16,9 @@ class ModeModelCallError(RuntimeError):
 
 
 _MAX_OUTPUT_CHARS = 8_000
+ADVISORY_SYSTEM_PROMPT = ("You are one role inside the Hermes assistant's multi-model answer. Your text may be shown "
+                         "to the user as Hermes' reply in an ongoing conversation: use the recent conversation, "
+                         "answer in the user's language, and do not call tools or describe yourself or your limits.")
 _TIMEOUT_SECONDS = 30.0
 
 
@@ -33,7 +36,7 @@ def _auxiliary_transport(**kwargs: Any) -> Any:
     return client.chat.completions.create(
         model=kwargs["model"],
         messages=[
-            {"role": "system", "content": "Provide read-only advice. Do not request or execute tools."},
+            {"role": "system", "content": ADVISORY_SYSTEM_PROMPT},
             {"role": "user", "content": kwargs["prompt"]},
         ],
         max_tokens=kwargs["max_tokens"], timeout=kwargs["timeout"],

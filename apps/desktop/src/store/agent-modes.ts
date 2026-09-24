@@ -191,6 +191,21 @@ export function migrateModePreferences(from: string, to: string): void {
   invalidateModeSupport(oldScope)
 }
 
+/**
+ * Delegate/Debate apply to one message: an accepted send returns the scope to
+ * Normal so later follow-ups keep the main agent's tools, persona and history.
+ * A refused send keeps the choice so the user can retry the same draft.
+ */
+export async function sendOnceWithMode(scope: string | undefined, send: () => boolean | Promise<boolean>): Promise<boolean> {
+  const accepted = await send()
+
+  if (accepted && scope && selectedMode(scope) !== 'normal') {
+    setModeChoice(scope, 'normal')
+  }
+
+  return accepted
+}
+
 export function modePayload(scope: string, choice = selectedMode(scope)): Record<string, unknown> {
   if (choice === 'normal') {
     return {}

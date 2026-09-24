@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from tui_gateway.prompt_execution_modes import Route
+from tui_gateway import mode_model_call
 from tui_gateway.mode_model_call import ModeModelCallError, call_model
 
 
@@ -81,7 +82,7 @@ def test_auxiliary_transport_uses_selected_client_without_tools_or_fallback(monk
     assert resolved[0][1]["explicit_api_key"] == "route-key"
     assert requests == [{
         "model": "vendor/test", "messages": [
-            {"role": "system", "content": "Provide read-only advice. Do not request or execute tools."},
+            {"role": "system", "content": mode_model_call.ADVISORY_SYSTEM_PROMPT},
             {"role": "user", "content": "question"},
         ], "max_tokens": 32, "timeout": 30.0, "tools": None,
     }]

@@ -304,9 +304,11 @@ class ComputeHost:
         from tui_gateway.prompt_execution_modes import DebateOptions
         options = DebateOptions.model_validate(spec.options, strict=True)
         deadline = time.monotonic() + min(240, 30 * (2 * options.rounds + 1) + 15)
+        from tui_gateway.mode_context import conversation_excerpt
         self._run_isolated_proposal(frame, "debate", lambda session, cancelled: run_debate(
             frame["text"], options, call_model, cancelled=cancelled,
-            deadline_exceeded=lambda: time.monotonic() >= deadline))
+            deadline_exceeded=lambda: time.monotonic() >= deadline,
+            context=conversation_excerpt(session.get("history"), frame["text"])))
 
     def _run_isolated_delegate(self, frame: dict[str, Any], spec: Any) -> None:
         """Execute real read-only children; the answer is still only a proposal."""
@@ -314,9 +316,11 @@ class ComputeHost:
         def produce(session: dict, cancelled: Any) -> str:
             if cancelled():
                 raise RuntimeError("isolated Delegate cancelled")
+            from tui_gateway.mode_context import conversation_excerpt
             answer, _children = run_readonly_delegate_answer(
                 session["agent"], frame["text"], spec.options,
-                profile_home=session.get("profile_home"), cancelled=cancelled)
+                profile_home=session.get("profile_home"), cancelled=cancelled,
+                context=conversation_excerpt(session.get("history"), frame["text"]))
             return answer
         self._run_isolated_proposal(frame, "delegate", produce)
 
