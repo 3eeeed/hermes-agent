@@ -1,7 +1,7 @@
 import { useCallback, useRef } from 'react'
 
 import { interceptsTypedVoiceStop } from '@/lib/voice-stop-word'
-import { modePayload, modeScopeKey, selectedMode } from '@/store/agent-modes'
+import { modePayload, modeScopeKey, selectedMode, sendOnceWithMode } from '@/store/agent-modes'
 import { notifyError } from '@/store/notifications'
 
 import { runComposerMiddleware } from '../contrib'
@@ -30,6 +30,7 @@ export function useMiddlewareSubmit(onSubmitProp: ChatBarProps['onSubmit'], mode
       // The Agent mode is snapshotted at dispatch so a later dropdown change
       // never rewrites a message already on its way.
       let modeSnapshot: { execution_mode: 'delegate' | 'debate'; mode_options: Record<string, unknown> } | undefined
+      let modeScope: string | undefined
 
       if (modeProfile) {
         try {
@@ -38,6 +39,7 @@ export function useMiddlewareSubmit(onSubmitProp: ChatBarProps['onSubmit'], mode
 
           if (choice !== 'normal') {
             modeSnapshot = modePayload(scope, choice) as NonNullable<typeof modeSnapshot>
+            modeScope = scope
           }
         } catch (error) {
           notifyError(error, 'This agent mode is unavailable. Your draft was not sent.')
@@ -67,11 +69,13 @@ export function useMiddlewareSubmit(onSubmitProp: ChatBarProps['onSubmit'], mode
         return false
       }
 
-      return onSubmitProp(draft.text, {
-        ...options,
-        attachments: draft.attachments,
-        ...(modeSnapshot && { modePayload: modeSnapshot })
-      })
+      return sendOnceWithMode(modeScope, () =>
+        onSubmitProp(draft.text, {
+          ...options,
+          attachments: draft.attachments,
+          ...(modeSnapshot && { modePayload: modeSnapshot })
+        })
+      )
     },
     [onSubmitProp, modeConnectionId, modeProfile]
   )

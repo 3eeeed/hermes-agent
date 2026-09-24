@@ -943,10 +943,12 @@ def _invoke_debate(
         with session["history_lock"]:
             return bool(session.get("_turn_cancel_requested") or session.get("_closing")
                         or not session.get("running"))
+    from tui_gateway.mode_context import conversation_excerpt
     with _session_profile_runtime_scope(session):
         answer = run_debate(
             prompt, options, model_call or call_model,
-            cancelled=cancelled, deadline_exceeded=lambda: time.monotonic() >= deadline)
+            cancelled=cancelled, deadline_exceeded=lambda: time.monotonic() >= deadline,
+            context=conversation_excerpt(getattr(st, "history", None), prompt))
     commit_external_assistant_result(
         sid, session, user_text, answer, history_version=st.history_version)
     st.result = {"final_response": answer, "messages": list(session["history"])}
