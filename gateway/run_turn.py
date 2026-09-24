@@ -1594,6 +1594,21 @@ class GatewayTurnMixin:
         display_reasoning = escape_code_fences_for_display(display_reasoning)
         return f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
 
+    def _hmwa_discord_auto_approve(self, source, session_key):
+        """``discord.auto_approve: true`` -> sessions from the (allowlisted) owner in Discord run without
+        approval prompts, like /yolo. The hardline blocklist and approvals.deny still apply."""
+        try:
+            if source.platform != Platform.DISCORD or not session_key:
+                return
+            from gateway.run import _load_gateway_config
+            if not ((_load_gateway_config().get("discord") or {}).get("auto_approve")):
+                return
+            from tools.approval import enable_session_yolo, is_session_yolo_enabled
+            if not is_session_yolo_enabled(session_key):
+                enable_session_yolo(session_key)
+        except Exception:
+            logger.debug("discord auto-approve failed", exc_info=True)
+
     def _hmwa_runtime_footer_line(self, agent_result, source, _turn_seconds):
         """Runtime-metadata footer for the FINAL message of the turn; off by default
         (display.runtime_footer.enabled=false)."""
@@ -2013,6 +2028,7 @@ class GatewayTurnMixin:
         _session_env_tokens = self._set_session_env(context)
         from gateway.discord_status_card import schedule_forum_working
         schedule_forum_working(self, source)
+        self._hmwa_discord_auto_approve(source, session_key)
         if _channel_cwd := self._channel_cwd_for(source):
             from gateway.channel_cwd import bind_session_to_channel_cwd
             await asyncio.to_thread(
