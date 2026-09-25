@@ -139,6 +139,15 @@ def apply_stop_gates(
         logger.debug("verification stop-loop nudge issued (attempt %d)", agent._verification_stop_nudges)
         return verdict
 
+    from agent.delegate_orchestrator import verify_nudge as _delegate_verify_nudge
+    _delegate_nudge = _delegate_verify_nudge(agent)
+    if _delegate_nudge:
+        final_msg["finish_reason"] = "delegate_review_required"
+        _append_interim_answer(
+            agent, final_msg, messages, conversation_history, "delegate review interim flush failed"
+        )
+        return _continue(_delegate_nudge, "_delegate_review_synthetic")
+
     _attempt = getattr(agent, "_pre_verify_nudges", 0)
     _verify_nudge2 = _pre_verify_nudge(agent, final_response, _attempt)
     if _verify_nudge2:

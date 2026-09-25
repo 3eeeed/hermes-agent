@@ -1336,11 +1336,14 @@ class AIAgent(
         if lane_route is not None and (function_args.get("action") or "spawn") == "spawn":
             # Delegate mode: the worker runs on its lane and the orchestrator waits for it in-turn,
             # so the review and any correction happen before the user hears back.
-            return _delegate_task(
+            from agent.delegate_orchestrator import after_dispatch, before_dispatch
+            if (refusal := before_dispatch(self)) is not None:
+                return _tool_error(refusal)
+            return after_dispatch(self, _delegate_task(
                 goal=function_args.get("goal"), context=function_args.get("context"),
                 tasks=_strip_model_hidden_task_fields(tasks), background=False,
                 images=function_args.get("images"), parent_agent=self, credentials_cfg=lane_route,
-            )
+            ))
         # Top-level MODEL delegations always run in the background (handle returned, results re-enter as
         # messages). An ORCHESTRATOR SUBAGENT (depth > 0) stays synchronous — it needs results in-turn and
         # owns no gateway session. The schema-level `background` param is intentionally ignored.
