@@ -92,9 +92,9 @@ export function DelegateStrip({ sessionId }: DelegateStripProps) {
       >
         {progress.phase === 'interrupted' ? (
           <p className="px-2 pb-2 text-xs text-(--ui-text-secondary)">{copy.interruptedDetail}</p>
-        ) : (
+        ) : progress.changedCount !== null ? (
           <p className="px-2 pb-2 text-xs text-(--ui-text-secondary)">{copy.changed(progress.changedCount)}</p>
-        )}
+        ) : null}
       </StatusSection>
     </div>
   )
