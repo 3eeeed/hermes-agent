@@ -1906,6 +1906,9 @@ def _dispatch_pre_tool_call_hooks(
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """Invoke ``pre_tool_call`` hooks once; return ``(block_message, modified_args)`` — the resolved
     block/approve message (``None`` to proceed) and merged ``modify`` args (``None`` if none)."""
+    from agent.delegate_orchestrator import blocked_message
+    if (delegate_block := blocked_message(tool_name, str(hook_kwargs.get("task_id") or ""))) is not None:
+        return delegate_block, None
     details = _get_pre_tool_call_directive_details(tool_name, args, **hook_kwargs)
     block_msg = _resolve_block_from_details(
         details, tool_name, **{k: hook_kwargs.get(k, "") for k in ("turn_id", "tool_call_id", "session_id")})

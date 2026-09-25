@@ -1327,6 +1327,20 @@ class AIAgent(
     def _dispatch_delegate_task(self, function_args: dict) -> str:
         """Single call site for delegate_task dispatch; new DELEGATE_TASK_SCHEMA fields are added only here."""
         from tools.delegate_tool import _strip_model_hidden_task_fields, delegate_task as _delegate_task
+        from agent.delegate_orchestrator import routing_for_tasks
+        from tools.registry import tool_error as _tool_error
+        tasks = function_args.get("tasks")
+        lane_route, lane_error = routing_for_tasks(self, tasks if tasks is not None else [function_args])
+        if lane_error:
+            return _tool_error(lane_error)
+        if lane_route is not None and (function_args.get("action") or "spawn") == "spawn":
+            # Delegate mode: the worker runs on its lane and the orchestrator waits for it in-turn,
+            # so the review and any correction happen before the user hears back.
+            return _delegate_task(
+                goal=function_args.get("goal"), context=function_args.get("context"),
+                tasks=_strip_model_hidden_task_fields(tasks), background=False,
+                images=function_args.get("images"), parent_agent=self, credentials_cfg=lane_route,
+            )
         # Top-level MODEL delegations always run in the background (handle returned, results re-enter as
         # messages). An ORCHESTRATOR SUBAGENT (depth > 0) stays synchronous — it needs results in-turn and
         # owns no gateway session. The schema-level `background` param is intentionally ignored.

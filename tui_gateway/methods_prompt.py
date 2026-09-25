@@ -990,19 +990,13 @@ def _submit_prompt(rid, params: dict, reservation=None) -> dict:
         # `/work fix it` sends nine literal chars.
         text = _expand_skill_invocation_for_replay(text, str(session.get("session_key") or ""))
     turn_isolation = _session_uses_compute_host(session, _load_dashboard_process_isolation_config())
-    if execution_spec.mode == "delegate":
-        # Both inline and isolated Delegate commits are owned by the parent;
-        # the child may propose but never write an assistant row.
-        opts = execution_spec.options
-        if (not isinstance(text, str) or session.get("attached_images")
-                or not isinstance(opts.get("orchestrator"), dict)
-                or opts["orchestrator"].get("effort") is not None
-                or any(worker.get("effort") is not None for worker in opts["workers"])):
-            return _err(rid, 4126, "Delegate mode is unavailable for this session or options")
+    if execution_spec.mode == "delegate" and turn_isolation:
+        # The orchestrator is the session agent itself; isolated compute hosts do not run it yet.
+        return _err(rid, 4126, "Delegate mode is unavailable while dashboard.turn_isolation is on")
     if execution_spec.mode == "debate" and (
             not isinstance(text, str) or session.get("attached_images")):
         return _err(rid, 4126, "Debate mode does not accept image turns")
-    if execution_spec.mode in {"debate", "delegate"} and turn_isolation and not _active_session_lease_vouch(session):
+    if execution_spec.mode == "debate" and turn_isolation and not _active_session_lease_vouch(session):
         return _err(rid, 4126, f"{execution_spec.mode.capitalize()} mode is unavailable without a real parent session lease")
     if internal_hosted_submit and turn_isolation:
         return _err(rid, 4121, "hosted room turns do not support isolated compute workers yet")

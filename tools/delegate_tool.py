@@ -202,6 +202,8 @@ def _build_child_agent(
     # global. Only fallback policy follows the owner of a per-call route such
     # as auxiliary.review.
     delegation_cfg = _load_config()
+    if isinstance(routing_cfg, dict) and routing_cfg.get("reasoning_effort"):
+        delegation_cfg = {**delegation_cfg, "reasoning_effort": routing_cfg["reasoning_effort"]}
     child_toolsets, child_disabled_toolsets = _resolve_child_toolsets(parent_agent, toolsets, effective_role)
     if strict_route:
         if not force_leaf or effective_role != "leaf":
@@ -665,6 +667,11 @@ DELEGATE_TASK_SCHEMA = {
                             "pixels on their first turn; non-vision children get path hints for vision_analyze. Text "
                             "files do NOT belong here — put paths in 'context' instead.",
                             items={"type": "string"},
+                        ),
+                        "lane": _p(
+                            "string",
+                            "Delegate mode only: the configured worker lane that runs this task (its model and "
+                            "effort). Omit for the default lane. Ignored outside Delegate mode.",
                         ),
                         "group": _p(
                             "string",

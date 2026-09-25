@@ -830,31 +830,6 @@ def _invoke_agent(
         _usage_thread.join()
 
 
-def _invoke_delegate(sid: str, session: dict, st: _TurnRun, prompt: str,
-                     user_text: str, options) -> None:
-    """Run real read-only children, then persist only the selected orchestrator answer."""
-    from tui_gateway.delegate_readonly_lifecycle import run_readonly_delegate_answer
-    from tui_gateway.external_result_persistence import commit_external_assistant_result
-    from tui_gateway.prompt_execution_modes import DelegateOptions
-    if not isinstance(options, DelegateOptions) or not isinstance(prompt, str):
-        raise ValueError("Invalid admitted Delegate turn")
-    def cancelled() -> bool:
-        with session["history_lock"]:
-            return bool(session.get("_turn_cancel_requested") or session.get("_closing"))
-    if cancelled():
-        raise RuntimeError("Delegate cancelled before worker dispatch")
-    from tui_gateway.mode_context import conversation_excerpt
-    answer, _workers = run_readonly_delegate_answer(
-        st.agent, prompt, options.model_dump(mode="json"),
-        profile_home=session.get("profile_home"), cancelled=cancelled,
-        context=conversation_excerpt(getattr(st, "history", None), prompt))
-    # An interrupt may arrive while children are running. Child completion is
-    # not permission to publish into a cancelled/superseded parent turn.
-    commit_external_assistant_result(
-        sid, session, user_text, answer, history_version=st.history_version)
-    st.result = {"final_response": answer, "messages": list(session["history"])}
-
-
 def _invoke_debate(
     sid: str, session: dict, st: _TurnRun, prompt: str, user_text: str, options,
     *, model_call=None,
@@ -1124,8 +1099,6 @@ def _run_prompt_submit(
     expected_mode = session.get("_execution_mode", "normal")
     if expected_mode != "normal" or execution_spec is not None:
         execution_spec = require_execution_spec(execution_spec, expected_mode=expected_mode)
-    if expected_mode == "delegate" and (image_paths or not isinstance(text, str)):
-        raise ValueError("Delegate accepts text-only turns")
     if expected_mode == "debate" and (image_paths or not isinstance(text, str)):
         raise ValueError("Debate accepts text-only turns")
     # Every dispatch binds the session's own row (session_key, real source) before the turn writes:
@@ -1186,16 +1159,23 @@ def _run_prompt_submit(
                     st.receipt_committed = True
                 return
             prompt, run_message, cols, streamer = prepared
-            if execution_spec is not None and execution_spec.mode in {"debate", "delegate"}:
-                if execution_spec.mode == "debate":
-                    from tui_gateway.prompt_execution_modes import DebateOptions
-                    options = DebateOptions.model_validate(execution_spec.options, strict=True)
-                    _invoke_debate(sid, session, st, prompt, text, options)
-                else:
-                    from tui_gateway.prompt_execution_modes import DelegateOptions
-                    options = DelegateOptions.model_validate(execution_spec.options, strict=True)
-                    _invoke_delegate(sid, session, st, prompt, text, options)
+            if execution_spec is not None and execution_spec.mode == "debate":
+                from tui_gateway.prompt_execution_modes import DebateOptions
+                options = DebateOptions.model_validate(execution_spec.options, strict=True)
+                _invoke_debate(sid, session, st, prompt, text, options)
                 status_note = None  # External commit already published the durable rows.
+            elif execution_spec is not None and execution_spec.mode == "delegate":
+                # The session agent itself leads: full history, persona and tools, with writes
+                # refused and delegate_task routed to the configured lanes for this turn only.
+                from agent.delegate_orchestrator import orchestrator_turn, turn_note
+                from tui_gateway.session_notifications import _prepend_note
+                options = execution_spec.options
+                with orchestrator_turn(st.agent, str(session.get("session_key") or sid), options):
+                    _invoke_agent(
+                        sid, session, st, prompt, _prepend_note(run_message, turn_note(options)), streamer,
+                        images, display_kind, display_metadata, turn_author, text)
+                status_note = _absorb_turn_result(
+                    sid, session, st, text, display_kind, display_metadata)
             else:
                 _invoke_agent(
                     sid, session, st, prompt, run_message, streamer, images, display_kind,

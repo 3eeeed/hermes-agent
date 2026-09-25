@@ -8,13 +8,13 @@ export interface ModeRole {
 }
 export interface WorkerRole extends ModeRole {
   lane: string
+  responsibility?: string
 }
+/** The orchestrator is the session's own model; only its effort is configurable here. */
 export interface DelegateOptions {
-  orchestrator: ModeRole
+  orchestrator?: { effort?: string }
   workers: WorkerRole[]
-  max_iterations: number
-  max_concurrency: number
-  permissions: 'read-only'
+  default_lane?: string
 }
 export interface DebateOptions {
   side_a: ModeRole
@@ -78,24 +78,28 @@ function validRole(role: ModeRole): boolean {
   )
 }
 
+const EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh']
+
+function validDelegate(d: DelegateOptions): boolean {
+  const lanes = Array.isArray(d.workers) ? d.workers.map(worker => worker.lane?.trim()) : []
+
+  return (
+    lanes.length >= 1 &&
+    lanes.length <= 4 &&
+    new Set(lanes).size === lanes.length &&
+    d.workers.every(worker => validRole(worker) && !!worker.lane?.trim()) &&
+    (d.default_lane === undefined || lanes.includes(d.default_lane)) &&
+    (d.orchestrator?.effort === undefined || EFFORTS.includes(d.orchestrator.effort))
+  )
+}
+
 function validConfig(config: ModeConfig): boolean {
   const d = config.delegate
   const b = config.debate
 
   return (
     (!d ||
-      (validRole(d.orchestrator) &&
-        Array.isArray(d.workers) &&
-        d.workers.length >= 1 &&
-        d.workers.length <= 4 &&
-        d.workers.every(worker => validRole(worker) && !!worker.lane?.trim()) &&
-        Number.isInteger(d.max_iterations) &&
-        d.max_iterations >= 1 &&
-        d.max_iterations <= 4 &&
-        Number.isInteger(d.max_concurrency) &&
-        d.max_concurrency >= 1 &&
-        d.max_concurrency <= d.workers.length &&
-        d.permissions === 'read-only')) &&
+      validDelegate(d)) &&
     (!b ||
       (validRole(b.side_a) &&
         validRole(b.side_b) &&
@@ -192,14 +196,14 @@ export function migrateModePreferences(from: string, to: string): void {
 }
 
 /**
- * Delegate/Debate apply to one message: an accepted send returns the scope to
- * Normal so later follow-ups keep the main agent's tools, persona and history.
- * A refused send keeps the choice so the user can retry the same draft.
+ * Debate applies to one message: an accepted send returns the scope to Normal.
+ * Delegate stays on for the session (the orchestrator leads until the user turns
+ * it off). A refused send keeps the choice so the user can retry the same draft.
  */
 export async function sendOnceWithMode(scope: string | undefined, send: () => boolean | Promise<boolean>): Promise<boolean> {
   const accepted = await send()
 
-  if (accepted && scope && selectedMode(scope) !== 'normal') {
+  if (accepted && scope && selectedMode(scope) === 'debate') {
     setModeChoice(scope, 'normal')
   }
 
@@ -214,7 +218,15 @@ export function modePayload(scope: string, choice = selectedMode(scope)): Record
   if (!modeAvailable(scope, choice)) {
     throw new Error(`${choice} mode is unavailable on this backend.`)
   }
-  const options = readModeConfig(scope)[choice]
+  const saved = readModeConfig(scope)[choice]
+  const options =
+    choice === 'delegate' && saved
+      ? (({ workers, default_lane, orchestrator }: DelegateOptions) => ({
+          workers,
+          ...(default_lane ? { default_lane } : {}),
+          ...(orchestrator?.effort ? { orchestrator: { effort: orchestrator.effort } } : {})
+        }))(saved as DelegateOptions)
+      : saved
 
   if (!options) {
     throw new Error(`${choice} mode needs valid settings before sending.`)

@@ -14,14 +14,24 @@ import {
 } from '@/store/agent-modes'
 
 const blankRole = (): ModeRole => ({ provider: '', model: '' })
-const blankWorker = (): WorkerRole => ({ ...blankRole(), lane: 'research' })
-const defaultDelegate = (): DelegateOptions => ({
-  orchestrator: blankRole(),
-  workers: [blankWorker()],
-  max_iterations: 2,
-  max_concurrency: 1,
-  permissions: 'read-only'
-})
+const blankWorker = (index = 0): WorkerRole => ({ ...blankRole(), lane: index ? `worker-${index + 1}` : 'worker' })
+const defaultDelegate = (): DelegateOptions => ({ workers: [blankWorker()] })
+
+function EffortSelect({ label, value, onChange }: { label: string; value?: string; onChange: (effort?: string) => void }) {
+  return (
+    <label>
+      {label} effort{' '}
+      <select aria-label={`${label} effort`} onChange={event => onChange(event.target.value || undefined)} value={value ?? ''}>
+        <option value="">Default</option>
+        {REASONING_EFFORT_VALUES.map(effort => (
+          <option key={effort} value={effort}>
+            {effort}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
 const defaultDebate = (): DebateOptions => ({ side_a: blankRole(), side_b: blankRole(), judge: blankRole(), rounds: 1 })
 
 function RoleEditor({
@@ -69,21 +79,7 @@ function RoleEditor({
           ))}
         </select>
       </label>
-      <label>
-        {label} effort{' '}
-        <select
-          aria-label={`${label} effort`}
-          onChange={event => onChange({ ...role, effort: event.target.value || undefined })}
-          value={role.effort ?? ''}
-        >
-          <option value="">Default</option>
-          {REASONING_EFFORT_VALUES.map(effort => (
-            <option key={effort} value={effort}>
-              {effort}
-            </option>
-          ))}
-        </select>
-      </label>
+      <EffortSelect label={label} onChange={effort => onChange({ ...role, effort })} value={role.effort} />
     </div>
   )
 }
@@ -138,7 +134,7 @@ export function AgentModesSettings({ connectionId, profile }: { connectionId: st
       setError('')
       setSaved(`${mode} settings saved on this device.`)
     } catch {
-      setError('Choose a provider and model for every role and stay within the displayed bounds.')
+      setError('Choose a provider and model for every worker, and give each lane a unique name.')
       setSaved('')
     }
   }
@@ -154,20 +150,33 @@ export function AgentModesSettings({ connectionId, profile }: { connectionId: st
       {saved && <p role="status">{saved}</p>}
       <fieldset className="grid gap-2 rounded-lg border p-3">
         <legend>Delegate</legend>
-        <RoleEditor
+        <p>
+          The orchestrator is this chat&apos;s model: it reads, plans, briefs a worker, then reviews and runs the checks.
+          It cannot write files itself. Workers do the implementation with the normal tools and approvals. Delegate
+          stays on for the chat until you switch back to Normal.
+        </p>
+        <EffortSelect
           label="Orchestrator"
-          onChange={orchestrator => changeDelegate({ orchestrator })}
-          providers={providers}
-          role={delegate.orchestrator}
+          onChange={effort => changeDelegate({ orchestrator: effort ? { effort } : undefined })}
+          value={delegate.orchestrator?.effort}
         />
         {delegate.workers.map((worker, index) => (
           <div className="rounded border p-2" key={index}>
             <label>
-              Worker {index + 1} lane{' '}
+              Lane name{' '}
               <input
                 aria-label={`Worker ${index + 1} lane`}
                 onChange={event => changeWorker(index, { ...worker, lane: event.target.value })}
                 value={worker.lane}
+              />
+            </label>{' '}
+            <label>
+              Responsibility{' '}
+              <input
+                aria-label={`Worker ${index + 1} responsibility`}
+                onChange={event => changeWorker(index, { ...worker, responsibility: event.target.value || undefined })}
+                placeholder="e.g. frontend, tests"
+                value={worker.responsibility ?? ''}
               />
             </label>
             <RoleEditor
@@ -176,14 +185,24 @@ export function AgentModesSettings({ connectionId, profile }: { connectionId: st
               providers={providers}
               role={worker}
             />
+            <label>
+              <input
+                checked={(delegate.default_lane ?? delegate.workers[0]?.lane) === worker.lane}
+                name="delegate-default-lane"
+                onChange={() => changeDelegate({ default_lane: worker.lane })}
+                type="radio"
+              />{' '}
+              Default lane
+            </label>{' '}
             <button
               disabled={delegate.workers.length === 1}
-              onClick={() =>
+              onClick={() => {
+                const workers = delegate.workers.filter((_, i) => i !== index)
                 changeDelegate({
-                  workers: delegate.workers.filter((_, i) => i !== index),
-                  max_concurrency: Math.min(delegate.max_concurrency, delegate.workers.length - 1)
+                  workers,
+                  default_lane: delegate.default_lane === worker.lane ? undefined : delegate.default_lane
                 })
-              }
+              }}
               type="button"
             >
               Remove worker
@@ -192,36 +211,11 @@ export function AgentModesSettings({ connectionId, profile }: { connectionId: st
         ))}
         <button
           disabled={delegate.workers.length >= 4}
-          onClick={() => changeDelegate({ workers: [...delegate.workers, blankWorker()] })}
+          onClick={() => changeDelegate({ workers: [...delegate.workers, blankWorker(delegate.workers.length)] })}
           type="button"
         >
           Add worker
         </button>
-        <label>
-          Iterations (1–4){' '}
-          <input
-            max={4}
-            min={1}
-            onChange={event => changeDelegate({ max_iterations: Number(event.target.value) })}
-            type="number"
-            value={delegate.max_iterations}
-          />
-        </label>
-        <label>
-          Concurrency (1–{delegate.workers.length}){' '}
-          <input
-            max={delegate.workers.length}
-            min={1}
-            onChange={event => changeDelegate({ max_concurrency: Number(event.target.value) })}
-            type="number"
-            value={delegate.max_concurrency}
-          />
-        </label>
-        <p>
-          Permissions: read-only. Write/action approvals are not enabled by this editor. No spend cap is promised.
-          Stop interrupts workers and discards the answer; an orchestrator request already in flight may still finish
-          and incur usage. Per-role reasoning effort is not supported yet—leave effort at Default.
-        </p>
         <button onClick={() => save('delegate')} type="button">
           Save Delegate settings
         </button>

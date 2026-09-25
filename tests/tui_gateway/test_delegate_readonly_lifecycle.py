@@ -6,45 +6,6 @@ import pytest
 from tui_gateway.delegate_readonly_lifecycle import run_readonly_delegate
 
 
-def test_admitted_delegate_turn_uses_child_path_not_normal_agent(monkeypatch):
-    import threading
-    from tui_gateway import server
-    from tui_gateway.prompt_execution_modes import build_execution_spec
-    spec = build_execution_spec("delegate", {
-        "orchestrator": {"provider": "openrouter", "model": "judge"},
-        "workers": [{"lane": "research", "provider": "openrouter", "model": "worker"}],
-        "max_iterations": 2, "max_concurrency": 1, "permissions": "read-only"})
-    agent = SimpleNamespace(session_id="delegate-route-stored", interim_assistant_callback=None,
-                            run_conversation=lambda *a, **k: pytest.fail("normal agent ran"))
-    session = {"session_key": agent.session_id, "agent": agent, "history": [],
-               "history_lock": threading.RLock(), "history_version": 0, "running": True,
-               "_execution_mode": "delegate", "_execution_spec": spec}
-    calls, emitted = [], []
-    monkeypatch.setattr(server, "_ensure_session_db_row", lambda *a: True)
-    monkeypatch.setattr(server, "_admit_prompt_turn", lambda *a: ([], agent))
-    monkeypatch.setattr(server, "_record_turn_marker", lambda *a, **kw: "marker")
-    monkeypatch.setattr(server, "_prepare_turn_input", lambda *a: ("Question?", "Question?", 80, None))
-    def delegated(sid, sess, st, prompt, text, options):
-        calls.append((prompt, text, options.max_iterations))
-        st.result = {"final_response": "worker-synthesized answer", "messages": []}
-    monkeypatch.setattr(server, "_invoke_delegate", delegated, raising=False)
-    monkeypatch.setattr(server, "_invoke_agent", lambda *a: pytest.fail("normal agent ran"))
-    monkeypatch.setattr(server, "_complete_turn_payload", lambda sess, st, note, cols:
-                        ({"text": st.result["final_response"], "status": "complete"},
-                         st.result["final_response"], "complete"))
-    monkeypatch.setattr(server, "_finish_turn", lambda *a: None)
-    monkeypatch.setattr(server, "_after_complete_turn", lambda *a: None)
-    monkeypatch.setattr(server, "_goal_followup_after_turn", lambda *a: None)
-    monkeypatch.setattr(server, "_publish_session_control_snapshot", lambda *a, **kw: None)
-    monkeypatch.setattr(server, "_emit_settled_session_info", lambda *a: None)
-    monkeypatch.setattr(server, "_finish_session_turn", lambda *a: None)
-    monkeypatch.setattr(server, "_emit", lambda *a: emitted.append(a))
-    assert server._run_prompt_submit("rid", "runtime", session, "Question?", execution_spec=spec)
-    session["_run_thread"].join(timeout=5)
-    assert calls == [("Question?", "Question?", 2)]
-    assert [e[2]["text"] for e in emitted if e[0] == "message.complete"] == ["worker-synthesized answer"]
-
-
 def test_stop_during_inflight_synthesis_discards_answer(monkeypatch):
     import threading
     import hermes_cli.runtime_provider as providers
