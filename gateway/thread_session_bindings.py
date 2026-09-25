@@ -25,7 +25,7 @@ def bound_session_for(platform: str, thread_id: Optional[str]) -> Optional[str]:
     if not thread_id:
         return None
     try:
-        data = json.loads(_bindings_path().read_text())
+        data = json.loads(_bindings_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     value = (data.get(platform) or {}).get(str(thread_id)) if isinstance(data, dict) else None
