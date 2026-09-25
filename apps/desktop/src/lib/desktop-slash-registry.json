@@ -6,6 +6,7 @@
   "/copy": "terminal",
   "/cron": "terminal",
   "/curator": "advanced",
+  "/delegate": "messaging",
   "/deny": "messaging",
   "/exit": "terminal",
   "/fast": "advanced",
