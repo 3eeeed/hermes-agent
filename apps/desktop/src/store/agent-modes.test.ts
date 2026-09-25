@@ -36,11 +36,8 @@ describe('agent mode scope and wire contract', () => {
     const key = modeScopeKey('remote', 'alpha')
     saveModeConfig(key, {
       delegate: {
-        orchestrator: { provider: 'nous', model: 'model' },
-        workers: [{ lane: 'research', provider: 'nous', model: 'model' }],
-        max_iterations: 2,
-        max_concurrency: 1,
-        permissions: 'read-only'
+        orchestrator: { effort: 'high' },
+        workers: [{ lane: 'impl', provider: 'nous', model: 'model', effort: 'low' }]
       }
     })
     setModeChoice(key, 'delegate')

@@ -964,6 +964,17 @@ def _invoke_mode_turn(
         options = DebateOptions.model_validate(execution_spec.options, strict=True)
         _invoke_debate(sid, session, st, prompt, text, options)
         return None  # The external commit already published the durable rows.
+    if execution_spec is not None and execution_spec.mode == "delegate":
+        # The session agent itself leads: full history, persona and tools, with writes
+        # refused and delegate_task routed to the configured lanes for this turn only.
+        from agent.delegate_orchestrator import orchestrator_turn, turn_note
+        from tui_gateway.session_notifications import _prepend_note
+        options = execution_spec.options
+        with orchestrator_turn(st.agent, str(session.get("session_key") or sid), options):
+            _invoke_agent(
+                sid, session, st, prompt, _prepend_note(run_message, turn_note(options)), streamer,
+                images, display_kind, display_metadata, turn_author, text)
+        return _absorb_turn_result(sid, session, st, text, display_kind, display_metadata)
     _invoke_agent(
         sid, session, st, prompt, run_message, streamer, images, display_kind,
         display_metadata, turn_author, text)
@@ -1255,8 +1266,6 @@ def _run_prompt_submit(
     expected_mode = session.get("_execution_mode", "normal")
     if expected_mode != "normal" or execution_spec is not None:
         execution_spec = require_execution_spec(execution_spec, expected_mode=expected_mode)
-    if expected_mode == "delegate":
-        raise ValueError("Delegate execution is not installed")
     if expected_mode == "debate" and (image_paths or not isinstance(text, str)):
         raise ValueError("Debate accepts text-only turns")
     # Every dispatch binds the session's own row (session_key, real source) before the turn writes:

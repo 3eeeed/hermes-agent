@@ -517,7 +517,7 @@ def _(rid, params: dict) -> dict:
     module, never config: a believed-but-absent capability is worse."""
     from hermes_cli.active_sessions import PER_SESSION_EXCLUSIVE_SUBMIT
     return _ok(rid, {"per_session_exclusive_submit": bool(PER_SESSION_EXCLUSIVE_SUBMIT),
-                     "execution_modes": ["normal", "debate"]})
+                     "execution_modes": ["normal", "delegate", "debate"]})
 
 
 @method("client.capabilities")

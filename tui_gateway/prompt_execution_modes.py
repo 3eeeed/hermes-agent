@@ -24,16 +24,32 @@ class Route(_Options):
 
 
 class Worker(Route):
+    """One delegation lane: the route, effort and responsibility a worker runs under."""
     lane: str = Field(min_length=1, max_length=80)
-    toolsets: list[Literal["safe", "search", "web"]] | None = Field(default=None, max_length=3)
+    responsibility: str | None = Field(default=None, max_length=400)
+
+
+class OrchestratorSettings(_Options):
+    """The orchestrator is the session model; only its effort is overridable. provider/model
+    are accepted from older saved settings and ignored."""
+    provider: str | None = Field(default=None, max_length=100)
+    model: str | None = Field(default=None, max_length=200)
+    effort: Literal["none", "low", "medium", "high", "xhigh"] | None = None
 
 
 class DelegateOptions(_Options):
-    orchestrator: Route | None = None
+    """Delegate = the session's own model leads and briefs; lanes execute with full tools.
+
+    The orchestrator is the live session agent (its model and effort are the session's),
+    so no orchestrator route is carried. Legacy fields from the read-only design are
+    accepted and ignored so saved settings keep loading.
+    """
     workers: list[Worker] = Field(min_length=1, max_length=4)
-    max_iterations: int = Field(ge=1, le=20)
-    max_concurrency: int = Field(default=1, ge=1, le=4)
-    permissions: Literal["read-only"] = "read-only"
+    default_lane: str | None = Field(default=None, max_length=80)
+    orchestrator: OrchestratorSettings | None = None
+    max_iterations: int | None = Field(default=None, ge=1, le=20)
+    max_concurrency: int | None = Field(default=None, ge=1, le=4)
+    permissions: Literal["read-only", "workspace-write"] = "workspace-write"
 
 
 class DebateOptions(_Options):
@@ -99,8 +115,15 @@ def admission_error(mode: str | None, options: dict | None) -> str | None:
         model.model_validate(options, strict=True)
     except ValidationError as exc:
         return f"Invalid {selected} mode options: {exc.errors(include_url=False, include_input=False)}"
-    if selected == "debate":
-        return None  # Per-session isolation/text gates still run before any mutation.
+    if selected == "delegate":
+        lanes = [worker["lane"] for worker in (options or {})["workers"]]
+        if len(set(lanes)) != len(lanes):
+            return "Delegate lanes must have unique names"
+        default = (options or {}).get("default_lane")
+        if default is not None and default not in lanes:
+            return f"Delegate default lane '{default}' is not one of the configured lanes"
+    if selected in {"debate", "delegate"}:
+        return None  # Per-session isolation/text and route gates still run before mutation.
     return f"{selected.capitalize()} mode is unavailable: native child orchestration is not installed; no turn was started"
 
 

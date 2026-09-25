@@ -34,16 +34,14 @@ describe('agent mode settings', () => {
     render(<AgentModesSettings connectionId="remote" profile="research" />)
     await screen.findAllByRole('option', { name: 'Nous' })
 
-    for (const label of ['Orchestrator provider', 'Worker 1 provider']) {
-      fireEvent.change(screen.getByLabelText(label), { target: { value: 'nous' } })
-    }
-
-    for (const label of ['Orchestrator model', 'Worker 1 model']) {
-      fireEvent.change(screen.getByLabelText(label), { target: { value: 'hermes-4' } })
-    }
+    fireEvent.change(screen.getByLabelText('Worker 1 provider'), { target: { value: 'nous' } })
+    fireEvent.change(screen.getByLabelText('Worker 1 model'), { target: { value: 'hermes-4' } })
+    fireEvent.change(screen.getByLabelText('Worker 1 effort'), { target: { value: 'low' } })
+    fireEvent.change(screen.getByLabelText('Orchestrator effort'), { target: { value: 'high' } })
 
     fireEvent.click(screen.getByRole('button', { name: 'Save Delegate settings' }))
     await waitFor(() => expect(readModeConfig(scope).delegate?.workers).toHaveLength(1))
+    expect(readModeConfig(scope).delegate).toMatchObject({ orchestrator: { effort: 'high' }, workers: [{ effort: 'low' }] })
     expect(readModeConfig(modeScopeKey('local', 'research'))).toEqual({})
   })
 })

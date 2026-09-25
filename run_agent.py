@@ -1343,6 +1343,9 @@ class AIAgent(
     def _dispatch_delegate_task(self, function_args: dict) -> str:
         """Single call site for delegate_task dispatch; new DELEGATE_TASK_SCHEMA fields are added only here."""
         from tools.delegate_tool import _strip_model_hidden_task_fields, delegate_task as _delegate_task
+        from agent.delegate_orchestrator import dispatch_lane_task
+        if (lane_result := dispatch_lane_task(self, function_args)) is not None:
+            return lane_result  # Delegate mode: the worker runs on its lane, joined in-turn
         # Top-level MODEL delegations run in the background (handle returned, results re-enter as messages),
         # unless the session's delegate_task is the joined variant (one-shot, delegation.gateway_mode inline).
         # An ORCHESTRATOR SUBAGENT (depth > 0) stays synchronous — it needs results in-turn and owns no gateway

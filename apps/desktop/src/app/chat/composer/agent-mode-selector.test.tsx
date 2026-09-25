@@ -60,11 +60,14 @@ it('lets an advertised configured mode be chosen for future turns', async () => 
   expect(readModeConfig(scope).debate?.rounds).toBe(1)
 })
 
-it('returns to Normal after one accepted Delegate/Debate send, keeps it after a refused send', async () => {
+it('Debate returns to Normal after one accepted send; Delegate stays on for the chat', async () => {
   const scope = modeScopeKey('remote', 'default')
-  setModeChoice(scope, 'delegate')
+  setModeChoice(scope, 'debate')
   expect(await sendOnceWithMode(scope, async () => false)).toBe(false)
-  expect(selectedMode(scope)).toBe('delegate')
+  expect(selectedMode(scope)).toBe('debate')
   expect(await sendOnceWithMode(scope, async () => true)).toBe(true)
   expect(selectedMode(scope)).toBe('normal')
+  setModeChoice(scope, 'delegate')
+  expect(await sendOnceWithMode(scope, async () => true)).toBe(true)
+  expect(selectedMode(scope)).toBe('delegate')
 })

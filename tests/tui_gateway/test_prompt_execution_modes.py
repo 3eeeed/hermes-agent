@@ -42,10 +42,9 @@ def submit(**kwargs):
                  "judge": {"provider": "openai", "model": "gpt-test"}, "rounds": 1}),
 ])
 def test_unavailable_native_modes_refuse_before_turn_or_history_mutation(session, mode, options, monkeypatch):
-    if mode == "debate":
-        # Inline Debate is supported; an isolated (compute-host) session refuses it up front.
-        monkeypatch.setattr(server, "_session_uses_compute_host", lambda *a, **k: True)
-        monkeypatch.setattr(server, "_submit_prompt_to_compute_host", lambda *a, **k: pytest.fail("dispatched"))
+    # Isolated compute hosts never run agent modes: the orchestrator is the session agent.
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda *a, **k: True)
+    monkeypatch.setattr(server, "_submit_prompt_to_compute_host", lambda *a, **k: pytest.fail("dispatched"))
     before = (list(session["history"]), session["running"], session["inflight_turn"])
     result = submit(execution_mode=mode, mode_options=options)
     assert result["error"]["message"].lower().find(mode) >= 0
@@ -78,7 +77,7 @@ def test_invalid_options_do_not_echo_private_values(session):
 
 def test_gateway_advertises_verified_debate_mode():
     response = server.handle_request({"id": 6, "method": "gateway.capabilities", "params": {}})
-    assert response["result"]["execution_modes"] == ["normal", "debate"]
+    assert response["result"]["execution_modes"] == ["normal", "delegate", "debate"]
 
 
 def test_saved_desktop_delegate_settings_use_the_backend_contract(session):
@@ -87,5 +86,9 @@ def test_saved_desktop_delegate_settings_use_the_backend_contract(session):
         "workers": [{"lane": "research", "provider": "openai-codex", "model": "gpt-test"}],
         "max_iterations": 2, "max_concurrency": 1, "permissions": "read-only",
     }
-    error = admission_error("delegate", options)
-    assert error is not None and error.startswith("Delegate mode is unavailable")
+    # Settings saved by the earlier editor (orchestrator route, per-role effort) keep working:
+    # a chosen effort is honoured, never a reason to lock the mode.
+    assert admission_error("delegate", options) is None
+    duplicate = {"workers": [{"lane": "a", "provider": "p", "model": "m"}] * 2}
+    assert admission_error("delegate", duplicate) == "Delegate lanes must have unique names"
+
