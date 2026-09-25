@@ -81,3 +81,28 @@ def test_phases_report_progress_and_a_stopped_worker_is_interrupted(tmp_path, mo
         orch.after_dispatch(agent, "{}")
         turn.interrupted = True
     assert phases[-1] == "interrupted"
+
+
+def test_review_outside_git_reports_unknown_count_not_zero(tmp_path, monkeypatch):
+    from gateway.slash_commands_delegate import phase_line
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))  # plain folder, no git
+    options = {"workers": [{"lane": "code", "provider": "anthropic", "model": "m"}]}
+    seen = []
+    agent = SimpleNamespace(reasoning_config=None, _interrupt_requested=False)
+    with orch.orchestrator_turn(agent, "t", options, on_phase=seen.append):
+        orch.routing_for_tasks(agent, [{"goal": "x"}])
+        orch.before_dispatch(agent)
+        orch.after_dispatch(agent, "{}")
+    review = next(info for info in seen if info["phase"] == "review")
+    assert review["changed_count"] is None
+    assert "0 file" not in phase_line(review)
+
+    _repo(tmp_path)  # inside git the count is real
+    seen.clear()
+    with orch.orchestrator_turn(agent, "t", options, on_phase=seen.append):
+        orch.routing_for_tasks(agent, [{"goal": "x"}])
+        orch.before_dispatch(agent)
+        (tmp_path / "new.txt").write_text("x")
+        orch.after_dispatch(agent, "{}")
+    review = next(info for info in seen if info["phase"] == "review")
+    assert review["changed_count"] == 1 and "1 file(s) changed" in phase_line(review)

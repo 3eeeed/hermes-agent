@@ -45,6 +45,7 @@ class _TurnState:
     changed: list[str] = field(default_factory=list)
     lane: str = ""
     worker_running: bool = False
+    tracked: bool | None = None  # False once a review found no git repo to diff against
     interrupted: bool = False
     on_phase: Callable[[dict], None] | None = None
 
@@ -55,7 +56,9 @@ def _publish(state: _TurnState, phase: str) -> None:
         return
     try:
         state.on_phase({"phase": phase, "attempt": state.attempts, "max_attempts": MAX_WORKER_ATTEMPTS,
-                        "lane": state.lane, "changed_count": len(state.changed)})
+                        "lane": state.lane,
+                        # None = unknown (no git repo); never report an unmeasured 0.
+                        "changed_count": None if state.tracked is False else len(state.changed)})
     except Exception:
         pass
 
@@ -202,6 +205,7 @@ def after_dispatch(agent: Any, result: str) -> str:
         state.awaiting_check = True
         state.verify_nudged = False
         state.worker_running = False
+        state.tracked = changed is not None
         if changed:
             state.changed = sorted(set(state.changed) | set(changed))
     _publish(state, "review")

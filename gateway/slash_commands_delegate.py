@@ -18,7 +18,8 @@ _OFF = {"off", "disable", "stop", "no", "normal"}
 # Phase → the one short line the chat gets; planning/done stay quiet to avoid noise.
 _PHASE_LINES = {
     "worker": lambda info: f"🧑‍🔧 Worker running ({info['lane']}) · attempt {info['attempt']}/{info['max_attempts']}",
-    "review": lambda info: f"🔎 Reviewing the worker's changes ({info['changed_count']} file(s) changed)",
+    "review": lambda info: "🔎 Reviewing the worker's changes" + (
+        f" ({info['changed_count']} file(s) changed)" if info.get("changed_count") is not None else ""),
     "interrupted": lambda info: "⚠️ Delegate interrupted while a worker was running — its edits may be partial.",
 }
 

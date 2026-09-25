@@ -7,7 +7,8 @@ export type DelegatePhase = 'planning' | 'worker' | 'review' | 'done' | 'interru
 
 export interface DelegateProgress {
   attempt: number
-  changedCount: number
+  /** null when the workspace can't be diffed (not a git repo): unknown, not zero. */
+  changedCount: number | null
   lane: string
   maxAttempts: number
   phase: DelegatePhase
@@ -33,7 +34,7 @@ export function applyDelegateStatus(sid: string, payload: Record<string, unknown
 
   const progress: DelegateProgress = {
     attempt: num(payload?.attempt),
-    changedCount: num(payload?.changed_count),
+    changedCount: typeof payload?.changed_count === 'number' ? num(payload.changed_count) : null,
     lane: typeof payload?.lane === 'string' ? payload.lane : '',
     maxAttempts: num(payload?.max_attempts, 3),
     phase: phase as DelegatePhase,
