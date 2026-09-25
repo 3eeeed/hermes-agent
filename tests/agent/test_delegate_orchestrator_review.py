@@ -2,6 +2,7 @@
 that attempt, and the orchestrator cannot answer before checking the latest result."""
 import json
 import subprocess
+from types import SimpleNamespace
 
 from agent import delegate_orchestrator as orch
 
@@ -48,3 +49,35 @@ def test_worker_evidence_lists_only_its_own_changes_and_gates_the_answer(tmp_pat
 
     assert orch.blocked_message("patch", "turn-1") is None  # nothing leaks past the turn
     assert orch.verify_nudge(agent) is None
+
+
+def test_phases_report_progress_and_a_stopped_worker_is_interrupted(tmp_path, monkeypatch):
+    _repo(tmp_path)
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+    options = {"workers": [{"lane": "code", "provider": "anthropic", "model": "m"}]}
+
+    def run(stop_midway):
+        phases = []
+        agent = SimpleNamespace(reasoning_config=None, _interrupt_requested=False)
+        with orch.orchestrator_turn(agent, "t", options, on_phase=lambda info: phases.append(info["phase"])):
+            orch.routing_for_tasks(agent, [{"goal": "x"}])
+            orch.before_dispatch(agent)
+            if stop_midway:
+                pass  # the worker never returned: the turn ended under it
+            else:
+                orch.after_dispatch(agent, "{}")
+        return phases
+
+    assert run(False) == ["planning", "worker", "review", "done"]
+    assert run(True) == ["planning", "worker", "interrupted"]
+
+    # Stopped after the worker returned: the finalizer already cleared the agent's own flag,
+    # so the gateway marks the turn from its result.
+    phases = []
+    agent = SimpleNamespace(reasoning_config=None, _interrupt_requested=False)
+    with orch.orchestrator_turn(agent, "t", options, on_phase=lambda info: phases.append(info["phase"])) as turn:
+        orch.routing_for_tasks(agent, [{"goal": "x"}])
+        orch.before_dispatch(agent)
+        orch.after_dispatch(agent, "{}")
+        turn.interrupted = True
+    assert phases[-1] == "interrupted"

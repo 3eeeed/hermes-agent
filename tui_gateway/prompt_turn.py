@@ -970,10 +970,19 @@ def _invoke_mode_turn(
         from agent.delegate_orchestrator import orchestrator_turn, turn_note
         from tui_gateway.session_notifications import _prepend_note
         options = execution_spec.options
-        with orchestrator_turn(st.agent, str(session.get("session_key") or sid), options):
-            _invoke_agent(
-                sid, session, st, prompt, _prepend_note(run_message, turn_note(options)), streamer,
-                images, display_kind, display_metadata, turn_author, text)
+        # Phase changes feed the composer's Delegate strip; `phase` is the machine field.
+        def _delegate_phase(info, _sid=sid):
+            _emit("status.update", _sid, {"kind": "delegate", "text": info["phase"], **info})
+        with orchestrator_turn(
+                st.agent, str(session.get("session_key") or sid), options,
+                on_phase=_delegate_phase) as delegate_turn:
+            try:
+                _invoke_agent(
+                    sid, session, st, prompt, _prepend_note(run_message, turn_note(options)), streamer,
+                    images, display_kind, display_metadata, turn_author, text)
+            finally:
+                result = getattr(st, "result", None)
+                delegate_turn.interrupted = not isinstance(result, dict) or bool(result.get("interrupted"))
         return _absorb_turn_result(sid, session, st, text, display_kind, display_metadata)
     _invoke_agent(
         sid, session, st, prompt, run_message, streamer, images, display_kind,

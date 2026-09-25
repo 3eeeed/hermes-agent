@@ -203,6 +203,17 @@ export const arChat = {
     goalDone: 'اكتمل الهدف',
     goalPaused: 'الهدف متوقف مؤقتًا',
     goalWaiting: 'الهدف قيد الانتظار',
+    delegate: {
+      planning: 'التفويض · تخطيط',
+      worker: (lane: string) => (lane ? `العامل يعمل (${lane})` : 'العامل يعمل'),
+      review: 'مراجعة تغييرات العامل',
+      done: 'التفويض · اكتمل',
+      interrupted: 'التفويض · توقف',
+      interruptedDetail: 'توقف الدور أثناء عمل العامل. قد تكون تعديلاته ناقصة — راجع الملفات قبل المتابعة.',
+      attempt: (attempt: number, max: number) => `محاولة ${attempt}/${max}`,
+      changed: (count: number) => `${count} ملف تغيّر حتى الآن`,
+      stopWorker: 'إيقاف العامل'
+    },
     subagents: count => `${count} ${count === 1 ? 'وكيل فرعي' : 'وكيل فرعي'}`,
     todos: (done, total) => `المهام ${done}/${total}`,
     previousTodos: (done, total) => `المهام السابقة ${done}/${total}`,

@@ -3528,6 +3528,17 @@ export const en: Translations = {
     goalPaused: 'Goal paused',
     goalWaiting: 'Goal waiting',
     subagents: count => `${count} Subagent${count === 1 ? '' : 's'}`,
+    delegate: {
+      planning: 'Delegate · planning',
+      worker: lane => (lane ? `Worker running (${lane})` : 'Worker running'),
+      review: 'Reviewing the worker’s changes',
+      done: 'Delegate · done',
+      interrupted: 'Delegate · interrupted',
+      interruptedDetail: 'The turn stopped while a worker was running. Its edits may be partial — check the files before continuing.',
+      attempt: (attempt, max) => `attempt ${attempt}/${max}`,
+      changed: count => (count === 1 ? '1 file changed so far' : `${count} files changed so far`),
+      stopWorker: 'Stop worker'
+    },
     todos: (done, total) => `Tasks ${done}/${total}`,
     previousTodos: (done, total) => `Previous tasks ${done}/${total}`,
     running: 'Running',

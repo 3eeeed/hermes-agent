@@ -22,6 +22,7 @@ import { todoTree } from '@/lib/todos'
 import { useSessionSlice, useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { $billingBlock } from '@/store/billing-block'
+import { $delegateBySession } from '@/store/delegate-status'
 import {
   $statusItemsBySession,
   type ComposerStatusItem,
@@ -40,6 +41,7 @@ import { $threadScrolledUpBySession } from '@/store/thread-scroll'
 import { $retainedTodosBySession } from '@/store/todos'
 import { openSessionInNewWindow } from '@/store/windows'
 
+import { DelegateStrip } from './delegate-strip'
 import { PreviewStatusRow } from './preview-row'
 import { SessionControlSections } from './session-control'
 import { useSessionValue } from './session-control-utils'
@@ -129,6 +131,7 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
   const busy = useStore(useSessionView().$busy)
   const previews = useSessionSlice($previewStatusBySession, sessionId)
   const controlEntry = useSessionValue($sessionControlBySession, sessionId)
+  const delegateProgress = useSessionValue($delegateBySession, sessionId)
 
   const surfaceId = useComposerSurfaceId()
   const scrollSessionId = sessionId ?? surfaceId
@@ -247,6 +250,10 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
       controlEntry.snapshot?.loop ||
       controlEntry.snapshot?.heartbeat)
   )
+
+  if (sessionId && delegateProgress) {
+    sections.push({ key: 'delegate', node: <DelegateStrip sessionId={sessionId} /> })
+  }
 
   if (sessionId && controlEntry && hasControlContent) {
     sections.push({
