@@ -20,7 +20,7 @@ import os
 import subprocess
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Callable, Any, Iterator
 
 # Tools that change the workspace. Reading, searching, and running checks stay the
 # orchestrator's own work; everything that writes goes through a worker.
@@ -43,6 +43,21 @@ class _TurnState:
     workspace: str = ""
     baseline: dict[str, str] | None = None
     changed: list[str] = field(default_factory=list)
+    lane: str = ""
+    worker_running: bool = False
+    interrupted: bool = False
+    on_phase: Callable[[dict], None] | None = None
+
+
+def _publish(state: _TurnState, phase: str) -> None:
+    """Tell the UI where the turn stands; a display failure never touches the turn."""
+    if state.on_phase is None:
+        return
+    try:
+        state.on_phase({"phase": phase, "attempt": state.attempts, "max_attempts": MAX_WORKER_ATTEMPTS,
+                        "lane": state.lane, "changed_count": len(state.changed)})
+    except Exception:
+        pass
 
 
 _lock = threading.Lock()
@@ -93,6 +108,7 @@ def routing_for_tasks(agent: Any, tasks: Any) -> tuple[dict | None, str | None]:
     name = names.pop()
     if name not in routes:
         return None, f"Delegate mode: unknown lane '{name}'. Configured lanes: {', '.join(routes)}."
+    agent._delegate_active_lane = name
     return routes[name], None
 
 
@@ -163,10 +179,13 @@ def before_dispatch(agent: Any) -> str | None:
             return (f"Delegate mode: the worker budget for this message is spent ({MAX_WORKER_ATTEMPTS} "
                     "attempts). Stop and tell the user exactly what is done, what failed, and what is left.")
         state.attempts += 1
+        state.lane = getattr(agent, "_delegate_active_lane", "") or getattr(agent, "_delegate_default_lane", "") or ""
         workspace = state.workspace = _workspace_for(task_id)
     baseline = snapshot(workspace)
     with _lock:
         state.baseline = baseline
+        state.worker_running = True
+    _publish(state, "worker")
     return None
 
 
@@ -182,8 +201,10 @@ def after_dispatch(agent: Any, result: str) -> str:
     with _lock:
         state.awaiting_check = True
         state.verify_nudged = False
+        state.worker_running = False
         if changed:
             state.changed = sorted(set(state.changed) | set(changed))
+    _publish(state, "review")
     if changed is None:
         observed = {"available": False, "note": "workspace is not a git repository; review by reading files."}
     else:
@@ -251,24 +272,34 @@ def turn_note(options: dict) -> str:
 
 
 @contextlib.contextmanager
-def orchestrator_turn(agent: Any, task_id: str, options: dict) -> Iterator[None]:
-    """Arm the orchestrator gate, lane routing, review state and orchestrator effort for one turn."""
+def orchestrator_turn(
+    agent: Any, task_id: str, options: dict, on_phase: Callable[[dict], None] | None = None,
+) -> Iterator[_TurnState]:
+    """Arm the orchestrator gate, lane routing, review state and orchestrator effort for one turn.
+
+    Yields the turn state; the caller sets ``interrupted`` from the turn result (the agent's own
+    interrupt flag is already cleared by the finalizer when control returns here)."""
     from hermes_constants import parse_reasoning_effort
     orchestrator = options.get("orchestrator") or {}
     effort = parse_reasoning_effort(orchestrator.get("effort")) if orchestrator.get("effort") else None
     saved_reasoning = getattr(agent, "reasoning_config", None)
     with _lock:
-        _turns[task_id] = _TurnState(workspace=_workspace_for(task_id))
+        state = _turns[task_id] = _TurnState(workspace=_workspace_for(task_id), on_phase=on_phase)
+    _publish(state, "planning")
     agent._delegate_task_id = task_id
     agent._delegate_lane_routes = lane_routes(options)
     agent._delegate_default_lane = default_lane(options)
     if effort is not None:
         agent.reasoning_config = effort
     try:
-        yield
+        yield state
     finally:
         with _lock:
             _turns.pop(task_id, None)
+        # A worker still marked running here means the turn ended under it (Stop, crash,
+        # disconnect): its edits may be partial, so say so instead of silently clearing.
+        interrupted = state.worker_running or state.interrupted or bool(getattr(agent, "_interrupt_requested", False))
+        _publish(state, "interrupted" if interrupted else "done")
         agent._delegate_task_id = ""
         agent._delegate_lane_routes = None
         agent._delegate_default_lane = None

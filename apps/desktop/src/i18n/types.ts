@@ -2663,6 +2663,17 @@ export interface Translations {
     goalPaused: string
     goalWaiting: string
     subagents: (count: number) => string
+    delegate: {
+      planning: string
+      worker: (lane: string) => string
+      review: string
+      done: string
+      interrupted: string
+      interruptedDetail: string
+      attempt: (attempt: number, max: number) => string
+      changed: (count: number) => string
+      stopWorker: string
+    }
     todos: (done: number, total: number) => string
     running: string
     stop: string

@@ -2182,6 +2182,17 @@ export const ar = defineLocale({
     goalPaused: 'الهدف متوقف مؤقتًا',
     goalWaiting: 'الهدف قيد الانتظار',
     subagents: count => `${count} ${count === 1 ? 'وكيل فرعي' : 'وكيل فرعي'}`,
+    delegate: {
+      planning: 'التفويض · تخطيط',
+      worker: lane => (lane ? `العامل يعمل (${lane})` : 'العامل يعمل'),
+      review: 'مراجعة تغييرات العامل',
+      done: 'التفويض · اكتمل',
+      interrupted: 'التفويض · توقف',
+      interruptedDetail: 'توقف الدور أثناء عمل العامل. قد تكون تعديلاته ناقصة — راجع الملفات قبل المتابعة.',
+      attempt: (attempt, max) => `محاولة ${attempt}/${max}`,
+      changed: count => `${count} ملف تغيّر حتى الآن`,
+      stopWorker: 'إيقاف العامل'
+    },
     todos: (done, total) => `المهام ${done}/${total}`,
     running: 'قيد التشغيل',
     stop: 'إيقاف',
