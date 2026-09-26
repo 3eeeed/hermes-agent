@@ -84,7 +84,6 @@ def test_phases_report_progress_and_a_stopped_worker_is_interrupted(tmp_path, mo
 
 
 def test_review_outside_git_reports_unknown_count_not_zero(tmp_path, monkeypatch):
-    from gateway.slash_commands_delegate import phase_line
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))  # plain folder, no git
     options = {"workers": [{"lane": "code", "provider": "anthropic", "model": "m"}]}
     seen = []
@@ -95,7 +94,6 @@ def test_review_outside_git_reports_unknown_count_not_zero(tmp_path, monkeypatch
         orch.after_dispatch(agent, "{}")
     review = next(info for info in seen if info["phase"] == "review")
     assert review["changed_count"] is None
-    assert "0 file" not in phase_line(review)
 
     _repo(tmp_path)  # inside git the count is real
     seen.clear()

@@ -27,6 +27,8 @@ class Worker(Route):
     """One delegation lane: the route, effort and responsibility a worker runs under."""
     lane: str = Field(min_length=1, max_length=80)
     responsibility: str | None = Field(default=None, max_length=400)
+    # Pool entry id (the provider's credential pool) this lane is pinned to; None = normal rotation.
+    credential_id: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class OrchestratorSettings(_Options):

@@ -91,6 +91,8 @@ def lane_routes(options: dict) -> dict[str, dict[str, Any]]:
         route = {"provider": worker["provider"], "model": worker["model"], "fallback_providers": []}
         if worker.get("effort"):
             route["reasoning_effort"] = worker["effort"]
+        if worker.get("credential_id"):
+            route["credential_id"] = worker["credential_id"]
         routes[worker["lane"]] = route
     return routes
 
@@ -111,8 +113,20 @@ def routing_for_tasks(agent: Any, tasks: Any) -> tuple[dict | None, str | None]:
     name = names.pop()
     if name not in routes:
         return None, f"Delegate mode: unknown lane '{name}'. Configured lanes: {', '.join(routes)}."
+    route = routes[name]
+    if route.get("credential_id") and not _account_registered(route["provider"], route["credential_id"]):
+        return None, (f"Delegate mode: the account chosen for lane '{name}' is no longer registered for "
+                      f"{route['provider']}. Tell the user to pick another account in Delegate settings.")
     agent._delegate_active_lane = name
-    return routes[name], None
+    return route, None
+
+
+def _account_registered(provider: str, credential_id: str) -> bool:
+    try:
+        from agent.credential_pool import load_pool
+        return any(entry.id == credential_id for entry in load_pool(provider).entries())
+    except Exception:
+        return False
 
 
 # ── workspace evidence ──────────────────────────────────────────────────────

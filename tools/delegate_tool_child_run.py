@@ -483,13 +483,16 @@ def _lease_child_credential(child: Any) -> tuple[Any, Optional[str]]:
     from tools.delegate_tool_routes import child_profile_scope
     base_url = getattr(child, "base_url", None)
     with child_profile_scope(child):
-        leased_cred_id = child_pool.acquire_lease()
+        # A Delegate lane pinned to one account leases exactly that entry; unpinned keeps the plain call.
+        pinned_id = getattr(child, "_delegate_credential_id", None)
+        pinned_id = pinned_id if isinstance(pinned_id, str) and pinned_id else None
+        leased_cred_id = child_pool.acquire_lease(pinned_id) if pinned_id else child_pool.acquire_lease()
         if leased_cred_id is not None:
             with _quiet("Failed to bind child to leased credential: %s"):
                 # Resolve the leased entry by id: the pool is shared with the parent/siblings, so current() is a
                 # mutable cursor that may already point at someone else's pick.
                 leased_entry = next((e for e in child_pool.entries() if e.id == leased_cred_id), None)
-                if not _entry_serves_endpoint(leased_entry, base_url):
+                if not pinned_id and not _entry_serves_endpoint(leased_entry, base_url):
                     child_pool.release_lease(leased_cred_id)
                     leased_entry = next(
                         (e for e in child_pool.entries() if e.last_status != "dead" and _entry_serves_endpoint(e, base_url)),
