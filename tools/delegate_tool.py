@@ -294,6 +294,19 @@ def _build_child_agent(
         child._credential_pool = None
     if child_pool is not None:
         child._credential_pool = child_pool
+    pinned_id = routing_cfg.get("credential_id") if isinstance(routing_cfg, dict) else None
+    if pinned_id:
+        # A Delegate lane pinned to one account: lease exactly that entry and never rotate the
+        # worker onto another account (fail visibly instead of billing a quota the user didn't pick).
+        if child_pool is None or not any(e.id == pinned_id for e in child_pool.entries()):
+            with _quiet("Failed to close unusable pinned child: %s"):
+                child.close()
+            raise ValueError(
+                f"The account chosen for this worker is no longer registered for {rt['provider']}; "
+                "pick another account in Delegate settings."
+            )
+        child._delegate_credential_id = pinned_id
+        child._session_pinned_credential_id = pinned_id
 
     _attach_child(parent_agent, child)  # interrupt propagation
     # spawn_requested now — the child may queue for seconds when the pool is

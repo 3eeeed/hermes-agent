@@ -394,7 +394,7 @@ def _lease_child_credential(child: Any) -> tuple[Any, Optional[str]]:
     child_pool = getattr(child, "_credential_pool", None)
     if child_pool is None:
         return None, None
-    leased_cred_id = child_pool.acquire_lease()
+    leased_cred_id = child_pool.acquire_lease(getattr(child, "_delegate_credential_id", None))
     if leased_cred_id is not None:
         with _quiet("Failed to bind child to leased credential: %s"):
             leased_entry = child_pool.current()

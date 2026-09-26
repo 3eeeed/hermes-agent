@@ -9,6 +9,8 @@ export interface ModeRole {
 export interface WorkerRole extends ModeRole {
   lane: string
   responsibility?: string
+  /** Pool entry id of the provider account this worker must use; absent = automatic rotation. */
+  credential_id?: string
 }
 /** The orchestrator is the session's own model; only its effort is configurable here. */
 export interface DelegateOptions {
@@ -59,11 +61,13 @@ export function setModeChoice(scope: string, mode: AgentMode): void {
   if (!MODES.includes(mode)) {
     throw new Error('Invalid agent mode')
   }
+
   if (mode === 'normal') {
     localStorage.removeItem(`${PREFIX}choice.${scope}`)
   } else {
     localStorage.setItem(`${PREFIX}choice.${scope}`, JSON.stringify(mode))
   }
+
   bump()
 }
 
@@ -87,7 +91,12 @@ function validDelegate(d: DelegateOptions): boolean {
     lanes.length >= 1 &&
     lanes.length <= 4 &&
     new Set(lanes).size === lanes.length &&
-    d.workers.every(worker => validRole(worker) && !!worker.lane?.trim()) &&
+    d.workers.every(
+      worker =>
+        validRole(worker) &&
+        !!worker.lane?.trim() &&
+        (worker.credential_id === undefined || (typeof worker.credential_id === 'string' && !!worker.credential_id))
+    ) &&
     (d.default_lane === undefined || lanes.includes(d.default_lane)) &&
     (d.orchestrator?.effort === undefined || EFFORTS.includes(d.orchestrator.effort))
   )
@@ -120,6 +129,7 @@ export function saveModeConfig(scope: string, config: ModeConfig): void {
   if (!validConfig(config)) {
     throw new Error('Invalid agent mode configuration')
   }
+
   localStorage.setItem(`${PREFIX}config.${scope}`, JSON.stringify(config))
   bump()
 }
@@ -141,6 +151,7 @@ export async function probeModeSupport(scope: string, request: () => Promise<unk
     if (probeGeneration.get(scope) !== generation) {
       return
     }
+
     const modes = Array.isArray(result?.execution_modes) ? result.execution_modes : []
     supported.set(scope, new Set(modes.filter((mode): mode is AgentMode => MODES.includes(mode))))
   } catch {
@@ -162,6 +173,7 @@ export function resetModeSupport(): void {
   for (const scope of probeGeneration.keys()) {
     invalidateModeSupport(scope)
   }
+
   supported.clear()
   bump()
 }
@@ -189,6 +201,7 @@ export function migrateModePreferences(from: string, to: string): void {
     if (value !== null && localStorage.getItem(newKey) === null) {
       localStorage.setItem(newKey, value)
     }
+
     localStorage.removeItem(oldKey)
   }
 
@@ -218,7 +231,9 @@ export function modePayload(scope: string, choice = selectedMode(scope)): Record
   if (!modeAvailable(scope, choice)) {
     throw new Error(`${choice} mode is unavailable on this backend.`)
   }
+
   const saved = readModeConfig(scope)[choice]
+
   const options =
     choice === 'delegate' && saved
       ? (({ workers, default_lane, orchestrator }: DelegateOptions) => ({
