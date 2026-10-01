@@ -791,7 +791,7 @@ def _apply_session_credential_selection(session: dict, agent) -> None:
     agent.credential_rotation_callback = persist_rotation
 
 
-def _compact_on_account_change(sid: str, session: dict, agent) -> None:
+def _compact_on_account_change(sid: str, session: dict, agent) -> bool:
     """Compact the transcript when the pinned pool account differs from the one that served the
     previous turn. A long history sent to a new account is written to that account's prompt cache
     at full price (and again next turn until the cache warms); one summary is far cheaper. The
@@ -799,7 +799,7 @@ def _compact_on_account_change(sid: str, session: dict, agent) -> None:
     restart or resume; the first turn ever only records it. A failed compaction never blocks."""
     current = session.pop("_turn_pool_credential", None)
     if not current or not current[1]:
-        return
+        return False
     from agent.credential_pool import SERVED_POOL_CREDENTIAL_KEY
     marker = f"{current[0]}:{current[1]}"
     session_key = _session_lookup_key(session)
@@ -813,14 +813,16 @@ def _compact_on_account_change(sid: str, session: dict, agent) -> None:
             if db is not None:
                 db.patch_session_model_config(session_key, {SERVED_POOL_CREDENTIAL_KEY: marker})
     if previous is None or previous == marker:
-        return
+        return False
     logger.info("Pool account changed for session=%s (%s -> %s): compacting before dispatch",
                 session_key, previous, marker)
     _status_update(sid, "compressing", "⠋ compacting history for the newly selected account…")
+    compacted = False
     try:
         removed, _usage = _compress_session_history(session)
         _sync_session_key_after_compress(sid, session, clear_pending_title=False, restart_slash_worker=True)
         if removed:
+            compacted = True
             _emit("session.info", sid, _session_info(agent, session))
             # Compression rotates the session id: re-stamp the marker on the live row.
             with _session_db(session) as db:
@@ -830,6 +832,7 @@ def _compact_on_account_change(sid: str, session: dict, agent) -> None:
         logger.warning("Account-switch compaction skipped for %s: %s", sid, exc)
     finally:
         _status_update(sid, "ready")
+    return compacted
 
 
 def _invoke_agent(
@@ -840,11 +843,11 @@ def _invoke_agent(
     ``text`` is the turn's raw submit, matched against the row staged by prompt.submit."""
     agent = st.agent
     _apply_session_credential_selection(session, agent)
-    _compact_on_account_change(sid, session, agent)
-    # Re-snapshot: compaction may have replaced session["history"].
-    with session["history_lock"]:
-        st.history = list(session["history"])
-        st.history_version = int(session.get("history_version", 0))
+    if _compact_on_account_change(sid, session, agent):
+        # Re-snapshot: compaction replaced session["history"].
+        with session["history_lock"]:
+            st.history = list(session["history"])
+            st.history_version = int(session.get("history_version", 0))
     st.compression_count = getattr(getattr(agent, "context_compressor", None), "compression_count", None)
     # Bot Chat mirrors gateway.stream_consumer: deltas are withheld while the reply could still
     # be a bare silence marker ("NO"->"NO_REPLY") or its last line a closing one

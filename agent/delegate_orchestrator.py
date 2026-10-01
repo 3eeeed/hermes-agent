@@ -134,7 +134,7 @@ def _account_registered(provider: str, credential_id: str) -> bool:
 def _git(workspace: str, *args: str) -> str | None:
     try:
         proc = subprocess.run(["git", "-C", workspace, *args], capture_output=True, text=True,
-                              timeout=_GIT_TIMEOUT_S)
+                              stdin=subprocess.DEVNULL, timeout=_GIT_TIMEOUT_S)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return proc.stdout if proc.returncode == 0 else None

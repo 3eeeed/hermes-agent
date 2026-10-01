@@ -139,6 +139,9 @@ def seams(monkeypatch):
         return _StubDB()
 
     class _Pool:
+        def resolve_target(self, target):
+            return int(target), object(), None
+
         def remove_index(self, _index):
             record["pool_home"].append(str(get_hermes_home()))
             return type("_Entry", (), {"source": ""})()
