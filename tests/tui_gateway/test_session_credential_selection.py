@@ -97,6 +97,19 @@ def test_no_pin_clears_the_remembered_credential_id(selection):
     assert agent._session_pinned_credential_id is None
 
 
+def test_db_unavailable_fails_open_as_unpinned(selection, monkeypatch):
+    """An unavailable session DB must never abort the turn: no persisted pin can be
+    read, so the session behaves as unpinned and rotation persistence is skipped."""
+    session, agent, db, entries = selection
+    agent._session_pinned_credential_id = "stale"
+    monkeypatch.setattr(server, "_session_db", lambda s: contextlib.nullcontext(None))
+    server._apply_session_credential_selection(session, agent)
+    assert agent._session_pinned_credential_id is None
+    agent._swap_credential.assert_not_called()
+    agent.credential_rotation_callback(entries[1])  # must not raise
+    db.patch_session_model_config.assert_not_called()
+
+
 def test_invoke_stops_before_conversation_when_selection_fails(selection):
     session, agent, db, entries = selection
     agent.run_conversation = Mock()

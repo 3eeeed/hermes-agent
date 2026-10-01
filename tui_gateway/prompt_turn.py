@@ -751,8 +751,14 @@ def _apply_session_credential_selection(session: dict, agent) -> None:
     session_key = _session_lookup_key(session)
     with _session_db(session) as db:
         if db is None:
-            raise RuntimeError("Cannot verify the selected account: session database unavailable.")
-        selected_id = db.get_session_model_config_value(session_key, pin_key)
+            # Fail open: without the DB there is no persisted pin to honour, so the turn
+            # proceeds exactly like an unpinned session (the pin guard only exists to stop
+            # silent rotation away from a pin the user actually chose).
+            logger.debug("Session credential pin check skipped (session database unavailable): "
+                         "session=%s provider=%s", session_key, provider)
+            selected_id = None
+        else:
+            selected_id = db.get_session_model_config_value(session_key, pin_key)
     # Remembered so a later 401/429 mid-turn can refuse to silently rotate this
     # session onto a DIFFERENT account than the one the user picked (desktop
     # account menu) — see recover_with_credential_pool's pin guard. The gateway's
@@ -785,7 +791,12 @@ def _apply_session_credential_selection(session: dict, agent) -> None:
         # Resolve the live key again: compression can move the conversation to a descendant.
         with _session_db(session) as db:
             if db is None:
-                raise RuntimeError("Cannot persist the replacement account: session database unavailable.")
+                # Never abort a live turn mid-rotation over bookkeeping: the rotation itself
+                # already happened; only its persistence is skipped.
+                logger.warning("Replacement account not persisted (session database unavailable): "
+                               "session=%s provider=%s credential_id=%s",
+                               _session_lookup_key(session), provider, getattr(entry, "id", None))
+                return
             db.patch_session_model_config(_session_lookup_key(session), {pin_key: entry.id})
 
     agent.credential_rotation_callback = persist_rotation
