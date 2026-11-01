@@ -288,6 +288,12 @@ from hermes_cli.web_upload_limit import ChatFileUploadLimitMiddleware
 # and the receive limit runs before FastAPI can spool a multipart attachment.
 app.add_middleware(ChatFileUploadLimitMiddleware)
 
+# Revalidate repeated JSON polls with ETag/304 (Desktop transcript/cron polling
+# over SSH re-sent identical bodies every few seconds).
+from hermes_cli.web_etag import JsonETagMiddleware  # noqa: E402
+
+app.add_middleware(JsonETagMiddleware)
+
 # Endpoints that do NOT require the session token; everything else under /api/
 # is gated below. Shared with the OAuth gate so the two allowlists cannot
 # drift (/api/status once 401'd under the OAuth gate, breaking the portal probe).
