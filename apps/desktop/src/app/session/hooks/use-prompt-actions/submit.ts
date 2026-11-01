@@ -1,6 +1,7 @@
 import { type PromptSubmitResult, randomUuid } from '@hermes/shared'
 import { type MutableRefObject, useCallback } from 'react'
 
+import { setPoolSessionCredentialSelection } from '@/api/system'
 import { getSession, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS } from '@/hermes'
 import { translateNow, type Translations } from '@/i18n'
 import { type ChatMessage, finalizeInterruptedMessages, textPart } from '@/lib/chat-messages'
@@ -13,6 +14,7 @@ import {
   stopVoicePlayback,
   takeVoicePlaybackInterrupted
 } from '@/lib/voice-playback'
+import { consumeDraftAnthropicCredentialSelection, consumeDraftCodexCredentialSelection } from '@/store/codex-credential-selection'
 import {
   $composerAttachments,
   type ComposerAttachment,
@@ -1034,6 +1036,32 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       }
 
       try {
+        // The account picker is available before the first message creates a
+        // durable chat. Commit that one-shot draft choice before prompt.submit,
+        // so the turn runner reads it while choosing its credential. Do not
+        // silently fall back to another account if this persistence fails.
+        //
+        // Both pooled providers are committed: a chat can carry a pending pick
+        // for each, and dropping Anthropic's here would silently run the first
+        // turn on a different Claude account than the one the menu shows.
+        for (const [provider, draft] of [
+          ['openai-codex', consumeDraftCodexCredentialSelection()],
+          ['anthropic', consumeDraftAnthropicCredentialSelection()]
+        ] as const) {
+          if (draft && targetStoredSessionId) {
+            const selected = await setPoolSessionCredentialSelection(
+              provider,
+              targetStoredSessionId,
+              draft.credentialId,
+              draft.profile
+            )
+
+            if (selected.credential_id !== draft.credentialId) {
+              throw new Error('Account selection could not be saved for this chat.')
+            }
+          }
+        }
+
         // Attach runs BEFORE prompt.submit, so a stale runtime id fails there
         // first and submit's own recovery never runs — that asymmetry is why
         // plain text survived sleep/wake but images reported "session not

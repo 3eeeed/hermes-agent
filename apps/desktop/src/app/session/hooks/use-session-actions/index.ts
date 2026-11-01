@@ -35,6 +35,7 @@ import { purgeInFlightTurnJournals, recoverInFlightTurnJournal } from '@/lib/inf
 import { latestSessionTodoSnapshot } from '@/lib/todos'
 import { setSessionYolo } from '@/lib/yolo-session'
 import { $clarifyRequests, clearClarifyRequest } from '@/store/clarify'
+import { clearDraftCodexCredentialSelection } from '@/store/codex-credential-selection'
 import { announceGoneSessionDraft, announceNewSessionDraftKey, migrateSessionDraft } from '@/store/composer'
 import { clearQueuedPrompts, migrateQueuedPrompts } from '@/store/composer-queue'
 import { resetSessionBackground } from '@/store/composer-status'
@@ -516,6 +517,9 @@ export function useSessionActions({
       }
 
       resetViewSync()
+      // A Codex account picked for an abandoned draft must never become the
+      // default for the next chat.
+      clearDraftCodexCredentialSelection()
       busyRef.current = false
       setBusy(false)
       setAwaitingResponse(false)
