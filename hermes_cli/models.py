@@ -1340,10 +1340,10 @@ def _openai_discovery_base_url(provider: str) -> str:
 
 
 def _codex_catalog(normalized: str, force_refresh: bool) -> list[str]:
-    from hermes_cli.codex_models import get_codex_model_ids
+    from hermes_cli.codex_models import union_codex_account_models
 
-    # Live OAuth token so the picker matches what ChatGPT lists for this account; hardcoded
-    # catalog without a token / when unreachable. Read-only (#68004): a picker never imports,
+    # Union of every configured account's live catalog (entitlements are account-scoped);
+    # hardcoded catalog without a token / when unreachable. Read-only (#68004): a picker never imports,
     # refreshes or persists a credential, so an expired stored token means the hardcoded catalog
     # until the runtime lease refreshes it.
     # The token and the host it is routed to come from the same resolution (#121486): a pooled
@@ -1358,7 +1358,7 @@ def _codex_catalog(normalized: str, force_refresh: bool) -> list[str]:
             access_token = None
     except Exception:
         access_token = None
-    return get_codex_model_ids(access_token=access_token, base_url=base_url)
+    return union_codex_account_models(access_token, base_url)
 
 
 def _nous_catalog(normalized: str, force_refresh: bool) -> Optional[list[str]]:

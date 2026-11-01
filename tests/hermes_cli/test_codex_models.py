@@ -398,3 +398,29 @@ def test_catalog_falls_back_to_the_ungated_sentinel_when_newest_client_is_reject
     entries, status = fetch_codex_catalog_entries(rejecting)
     assert [e["slug"] for e in entries] == ["gpt-5.5"] and status == 200
     assert fetch_codex_catalog_entries(lambda url: _Resp(200, [])) == ([], 200)
+def test_picker_catalog_unions_models_visible_to_pooled_codex_accounts(monkeypatch):
+    """The picker exposes the union of account-scoped Codex entitlements, each pool row asked on
+    its own route."""
+    from hermes_cli import auth, auth_codex, codex_models, models
+
+    monkeypatch.setattr(auth, "resolve_codex_runtime_credentials",
+                        lambda **_kwargs: {"api_key": "singleton-token", "base_url": "https://chatgpt.com/backend-api/codex"})
+    monkeypatch.setattr(auth, "_codex_access_token_is_expiring", lambda token, _skew: token == "pool-expired")
+    monkeypatch.setattr(auth, "read_credential_pool", lambda provider: [
+        {"access_token": "pool-token-a"}, {"access_token": "singleton-token"},
+        {"access_token": "pool-expired"}, {"access_token": "pool-token-b", "base_url": "https://gw.example"},
+    ] if provider == "openai-codex" else [])
+    monkeypatch.setattr(auth_codex, "_codex_pool_route_base_url", lambda base="": base or "https://default")
+    catalogs = {
+        "singleton-token": ["gpt-singleton"],
+        "pool-token-a": ["gpt-account-a", "gpt-shared"],
+        "pool-token-b": ["gpt-account-b", "gpt-shared"],
+    }
+    calls = []
+    monkeypatch.setattr(codex_models, "_fetch_models_from_api",
+                        lambda token, base_url=None: calls.append((token, base_url)) or catalogs[token])
+
+    assert models._codex_catalog("openai-codex", force_refresh=True) == [
+        "gpt-singleton", "gpt-account-a", "gpt-shared", "gpt-account-b"]
+    assert calls == [("singleton-token", "https://chatgpt.com/backend-api/codex"),
+                     ("pool-token-a", "https://default"), ("pool-token-b", "https://gw.example")]
