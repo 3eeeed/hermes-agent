@@ -40,7 +40,14 @@ import {
 } from '@/lib/icons'
 import { type RuntimeReadinessResult } from '@/lib/runtime-readiness'
 import { resolveSessionTimerSince } from '@/lib/session-timer-since'
-import { cacheHitLabel, contextBarLabel, LiveDuration, tokensPerSecondLabel, usageContextLabel } from '@/lib/statusbar'
+import {
+  cacheHitLabel,
+  contextBarLabel,
+  LiveDuration,
+  pooledAccountUsageLabel,
+  tokensPerSecondLabel,
+  usageContextLabel
+} from '@/lib/statusbar'
 import { rollbackSentence } from '@/lib/update-copy'
 import { formatPercentUsed, formatResetsIn } from '@/lib/usage-percent'
 import { useStoreSelector } from '@/lib/use-session-slice'
@@ -723,32 +730,51 @@ export function useStatusbarItems({
   )
 
   const coreRightStatusbarItems = useMemo<readonly StatusbarItem[]>(
-    () => [
-      ...([
+    () => {
+      // Both pools stay in the status line regardless of the focused chat's
+      // provider, so Claude and GPT accounts (and their quota) are always
+      // visible — not just the one currently serving the focused chat.
+      const poolDefs = [
         { controller: codex, id: 'codex-accounts', short: 'Codex', title: 'OpenAI Codex accounts', toggle: 'GPT accounts' },
         { controller: anthropic, id: 'anthropic-accounts', short: 'Claude', title: 'Anthropic accounts', toggle: 'Claude accounts' }
-      ] as const).flatMap(({ controller, id, short, title, toggle }) =>
-        controller.accounts.length || controller.canAddAccounts
-          ? [{
-              icon: <Hash className="size-3" />,
-              id,
-              label: controller.activeCredentialId
-                ? `${short} \u00b7 ${(controller.accounts.find(entry => entry.id === controller.activeCredentialId)?.label ?? '').trim() || 'Active'}`
-                // With no saved accounts the join would render an empty label,
-                // leaving an invisible statusbar item. Name the provider so the
-                // menu holding the add button is reachable.
-                : controller.accounts.length
-                  ? controller.accounts.map((entry, index) => controller.labelFor(entry, index)).join(' \u00b7 ')
-                  : `${short} \u00b7 Add account`,
-              menuAlign: 'end' as const,
-              menuClassName: 'w-80 border-(--ui-stroke-secondary) p-2',
-              menuContent: <PooledAccountsMenu controller={controller} focusedStoredSessionId={focusedStoredSessionId} />,
-              title,
-              toggleLabel: toggle,
-              variant: 'menu' as const
-            }]
-          : []
-      ),
+      ]
+
+      const accountItems: StatusbarItem[] = []
+
+      for (const pool of poolDefs) {
+        if (!(pool.controller.accounts.length || pool.controller.canAddAccounts)) {
+          continue
+        }
+
+        const activeEntry = pool.controller.accounts.find(entry => entry.id === pool.controller.activeCredentialId)
+
+        const accountLabel = activeEntry
+          ? pool.controller.labelFor(activeEntry, pool.controller.accounts.indexOf(activeEntry))
+          : null
+
+        const usage = activeEntry ? pool.controller.usageById.get(activeEntry.id) : null
+
+        const label = accountLabel
+          ? pooledAccountUsageLabel(pool.short, accountLabel, usage?.windows)
+          : pool.controller.accounts.length
+            ? `${pool.short} · Select account`
+            : `${pool.short} · Add account`
+
+        accountItems.push({
+          icon: <Hash className="size-3" />,
+          id: pool.id,
+          label,
+          menuAlign: 'end',
+          menuClassName: 'w-80 border-(--ui-stroke-secondary) p-2',
+          menuContent: <PooledAccountsMenu controller={pool.controller} focusedStoredSessionId={focusedStoredSessionId} />,
+          title: pool.title,
+          toggleLabel: pool.toggle,
+          variant: 'menu'
+        })
+      }
+
+      return [
+        ...accountItems,
       {
         detail: <LiveDuration since={turnStartedAt} />,
         hidden: !busy || !turnStartedAt,
@@ -844,7 +870,8 @@ export function useStatusbarItems({
       },
       clientVersionItem,
       ...(backendVersionItem ? [backendVersionItem] : [])
-    ],
+      ]
+    },
     [
       approvalModeItem,
       backendVersionItem,

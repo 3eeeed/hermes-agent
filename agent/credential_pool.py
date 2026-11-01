@@ -124,6 +124,10 @@ POOL_PIN_KEYS: Dict[str, str] = {
     "anthropic": "anthropic_credential_id",
 }
 
+# model_config key recording "<provider>:<credential_id>" of the account that served the session's
+# last turn. The turn runner compacts history when the pinned account differs from it.
+SERVED_POOL_CREDENTIAL_KEY = "served_pool_credential"
+
 STRATEGY_FILL_FIRST = "fill_first"
 STRATEGY_ROUND_ROBIN = "round_robin"
 STRATEGY_RANDOM = "random"
@@ -2271,6 +2275,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         failure_reason: Optional[str] = None,
         model: Optional[str] = None,
     ) -> Optional[PooledCredential]:
+        deferred: list[PooledCredential] = []
         with self._lock:
             identity_supplied = bool(credential_id or api_key_hint)
             entry = self._identify_failed_entry(credential_id, api_key_hint)
@@ -2321,23 +2326,28 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             else:
                 logger.info("credential pool: marking %s exhausted (status=%s), rotating", _label, status_code)
             self._current_id = None
-            next_entry, _pending = self._select_unlocked(refresh=False)
-            if next_entry is not None and next_entry.id == entry.id:
+            next_entry, pending_refresh = self._select_unlocked(refresh=True)
+            if next_entry is None and pending_refresh:
+                # Single-use-token candidates refresh outside the lock (credential_pool_rotation).
+                deferred = pending_refresh
+            elif next_entry is not None and next_entry.id == entry.id:
                 # No-recovery guard (#97315): selection handed back the very entry that was
                 # just marked (the auth-store sync adopted fresher tokens, or a quota probe
                 # false-positive lifted the bench mid-selection). Returning it reports a
                 # successful rotation without changing the credential, so the caller retries
-                # the same 429 forever (~2 req/s for hours). Mirror the single-entry guard on
-                # the unmatched-identity branch: surface the failure instead.
+                # the same 429 forever. Surface the failure instead.
                 logger.warning(
                     "credential pool: rotation returned the just-marked entry %s — "
                     "treating as no-recovery so the failure surfaces", _label,
                 )
                 self._current_id = None
                 return None
-            if next_entry:
-                logger.info("credential pool: rotated to %s", next_entry.label or next_entry.id[:8])
-            return next_entry
+            if not deferred:
+                if next_entry:
+                    logger.info("credential pool: rotated to %s", next_entry.label or next_entry.id[:8])
+                return next_entry
+        from agent.credential_pool_rotation import refresh_first_usable
+        return refresh_first_usable(self, deferred, failed_id=entry.id)
 
     # ---- leases ------------------------------------------------------------
 

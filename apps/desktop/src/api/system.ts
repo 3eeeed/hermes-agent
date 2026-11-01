@@ -9,6 +9,7 @@ import type {
   CodexSessionCredentialSelection,
   CodexSessionCredentialSelectionState,
   CredentialPoolDeleteResponse,
+  CredentialPoolRenameResponse,
   CredentialPoolResponse,
   CredentialPoolUsageResponse,
   CuratorStatusResponse,
@@ -250,6 +251,21 @@ export function deleteCodexCredential(
   profile?: null | string
 ): Promise<CredentialPoolDeleteResponse> {
   return deletePoolCredential('openai-codex', credentialId, profile)
+}
+
+/** Relabels an account. Identity (id, tokens, priority) is untouched server-side. */
+export function renamePoolCredential(
+  provider: PooledAccountProvider,
+  credentialId: string,
+  label: string,
+  profile?: null | string
+): Promise<CredentialPoolRenameResponse> {
+  return hermesApi<CredentialPoolRenameResponse>({
+    ...profileScoped(profile),
+    body: { label, ...(profile ? { profile } : {}) },
+    method: 'PATCH',
+    path: `/api/credentials/pool/${provider}/entries/${encodeURIComponent(credentialId)}`
+  })
 }
 
 export function updateHermes(): Promise<ActionResponse> {

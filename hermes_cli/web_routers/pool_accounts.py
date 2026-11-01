@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 
-from hermes_cli.web_models import CodexSessionCredentialSelect
+from hermes_cli.web_models import CodexSessionCredentialSelect, PooledCredentialRename
 from hermes_cli.web_routers._common import config_scoped_to_thread, destructive_profile
 
 _log = logging.getLogger("hermes_cli.web_server")
@@ -34,20 +34,23 @@ def _validated_pool_provider(provider: str) -> str:
 def _usage_entry(provider: str, entry: Any) -> dict[str, Any]:
     """One account's quota, never its credential material. Fails open per account."""
     from agent.account_usage import fetch_account_usage
+    from hermes_cli.web_routers.ops import pool_entry_account_email
 
+    email = pool_entry_account_email(entry)
     try:
         snapshot = fetch_account_usage(provider, base_url=entry.runtime_base_url, api_key=entry.runtime_api_key)
     except Exception:
         _log.debug("%s usage lookup failed for pool entry %s", provider, entry.id, exc_info=True)
         snapshot = None
     if snapshot is None:
-        return {"id": entry.id, "available": False, "label": entry.label}
+        return {"id": entry.id, "available": False, "label": entry.label, "email": email}
     return {
         "available": snapshot.available,
         "details": list(snapshot.details),
         "fetched_at": snapshot.fetched_at.isoformat(),
         "id": entry.id,
         "label": entry.label,
+        "email": email,
         "plan": snapshot.plan,
         "unavailable_reason": snapshot.unavailable_reason,
         "windows": [
@@ -151,6 +154,25 @@ async def get_pool_session_credential_selection(provider: str, session_id: str, 
             db.close()
 
     return await asyncio.to_thread(_run)
+
+
+@router.patch("/api/credentials/pool/{provider}/entries/{credential_id}")
+async def rename_pool_credential_entry(provider: str, credential_id: str, body: PooledCredentialRename):
+    """Relabel an account by its immutable pool id; identity (id, tokens, priority) is untouched."""
+    from agent.credential_pool import load_pool
+
+    provider = _validated_pool_provider(provider)
+    label = (body.label or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="A label cannot be blank")
+
+    def _run():
+        renamed = load_pool(provider).rename_entry(credential_id, label)
+        if renamed is None:
+            raise HTTPException(status_code=404, detail="Account was not found")
+        return {"ok": True, "provider": provider, "id": renamed.id, "label": renamed.label}
+
+    return await config_scoped_to_thread(body.profile, _run)
 
 
 @router.delete("/api/credentials/pool/{provider}/entries/{credential_id}")

@@ -7,6 +7,7 @@ import {
   getCredentialPoolUsage,
   getPoolSessionCredentialSelection,
   type PooledAccountProvider,
+  renamePoolCredential,
   setPoolSessionCredentialSelection
 } from '@/api/system'
 import type { CredentialPoolEntry, CredentialPoolResponse, CredentialPoolUsageEntry } from '@/types/hermes'
@@ -34,12 +35,18 @@ export interface PooledAccountsController {
   deleting: boolean
   labelFor: (entry: CredentialPoolEntry, index: number) => string
   pasteCode: string
+  /** The row being relabelled, with its in-progress text, or null. */
+  renameCandidate: { id: string; label: string } | null
+  renameError: null | string
+  renaming: boolean
   select: (credentialId: string) => void
   setDeleteCandidate: (candidate: { id: string; label: string } | null) => void
   setDeleteError: (message: null | string) => void
   setPasteCode: (code: string) => void
+  setRenameCandidate: (candidate: { id: string; label: string } | null) => void
   startAdd: () => Promise<void>
   submitPastedCode: () => Promise<void>
+  submitRename: () => Promise<void>
   usageById: Map<string, CredentialPoolUsageEntry>
   usageLoading: boolean
 }
@@ -78,6 +85,9 @@ export function usePooledAccounts(options: {
   const [deleteCandidate, setDeleteCandidate] = useState<{ id: string; label: string } | null>(null)
   const [deleteError, setDeleteError] = useState<null | string>(null)
   const [deleting, setDeleting] = useState(false)
+  const [renameCandidate, setRenameCandidate] = useState<{ id: string; label: string } | null>(null)
+  const [renameError, setRenameError] = useState<null | string>(null)
+  const [renaming, setRenaming] = useState(false)
 
   const accounts = useMemo(
     () => credentialPool.data?.providers.find(entry => entry.provider === provider)?.entries ?? [],
@@ -92,9 +102,13 @@ export function usePooledAccounts(options: {
     enabled,
     queryFn: () => getCredentialPoolUsage(provider, activeGatewayProfile || undefined),
     queryKey: ['credential-pool-usage', provider, activeGatewayProfile],
-    refetchInterval: 120_000,
+    // Quota can change while another model/account is serving the chat. Refresh
+    // on focus as well as every minute so a previously exhausted snapshot does
+    // not keep showing 0% after the provider already reports fresh capacity.
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: 'always',
     retry: false,
-    staleTime: 90_000
+    staleTime: 45_000
   })
 
   const canAddAccounts = accountUsage.data?.can_add_accounts ?? false
@@ -257,6 +271,37 @@ export function usePooledAccounts(options: {
     }
   }
 
+  const submitRename = async () => {
+    if (!renameCandidate) {
+      return
+    }
+
+    const label = renameCandidate.label.trim()
+
+    if (!label) {
+      setRenameError('Give the account a name.')
+
+      return
+    }
+
+    setRenaming(true)
+    setRenameError(null)
+
+    try {
+      await renamePoolCredential(provider, renameCandidate.id, label, activeGatewayProfile || undefined)
+      setRenameCandidate(null)
+      // The label is rendered from the pool listing, and the menu also shows it
+      // beside each account's quota, so refresh both rather than patching one
+      // cached copy and letting the other keep the old name.
+      void credentialPool.refetch()
+      void accountUsage.refetch()
+    } catch (error) {
+      setRenameError(error instanceof Error ? error.message : 'Could not rename this account.')
+    } finally {
+      setRenaming(false)
+    }
+  }
+
   const select = (credentialId: string) => {
     if (!focusedStoredSessionId) {
       onDraftSelect(credentialId)
@@ -289,12 +334,20 @@ export function usePooledAccounts(options: {
     deleting,
     labelFor: (entry, index) => (entry.label ?? '').trim() || String(index + 1),
     pasteCode,
+    renameCandidate,
+    renameError,
+    renaming,
     select,
     setDeleteCandidate,
     setDeleteError,
     setPasteCode,
+    setRenameCandidate: candidate => {
+      setRenameError(null)
+      setRenameCandidate(candidate)
+    },
     startAdd,
     submitPastedCode,
+    submitRename,
     usageById,
     usageLoading: accountUsage.isLoading
   }

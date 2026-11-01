@@ -68,3 +68,36 @@ def test_priority_honors_anthropic_manual_first():
     pool._entries[1] = replace(pool._entries[1], source="env:ANTHROPIC_API_KEY")
     assert pool.move_entry("row1", 0).priority == 1
     assert [e.id for e in pool.entries()] == ["row0", "row1"]
+
+
+def test_rename_changes_only_the_label():
+    """A label is presentation metadata: renaming must not touch identity.
+
+    If a rename altered the id, token, source, priority or cooldown it would
+    silently change which account is served, or where it sits in the fallback
+    order — a user relabelling a row to remember whose subscription it is must
+    never move it in the queue.
+    """
+    pool = _pool(exhausted=True)
+    before = {e.id: e for e in pool.entries()}
+
+    renamed = pool.rename_entry("row1", "  Ahmed personal  ")
+
+    assert renamed.label == "Ahmed personal", "label must be stored stripped"
+    unchanged = replace(before["row1"], label=renamed.label)
+    assert renamed == unchanged, "rename changed a field other than the label"
+    # Untargeted rows are untouched, and the new label survives a reload.
+    persisted = {e["id"]: e for e in read_credential_pool(pool.provider)}
+    assert persisted["row1"]["label"] == "Ahmed personal"
+    assert persisted["row0"] == before["row0"].to_dict()
+
+
+def test_rename_rejects_a_blank_label_and_an_unknown_target():
+    """A blank label would render as an unnamed row the user cannot identify."""
+    pool = _pool()
+    snapshot = read_credential_pool(pool.provider)
+
+    assert pool.rename_entry("row1", "   ") is None
+    assert pool.rename_entry("missing", "whoever") is None
+
+    assert read_credential_pool(pool.provider) == snapshot
