@@ -339,6 +339,7 @@ export function startOAuthLogin(
   // addAccount keeps the provider's existing logins and appends this grant as a
   // new credential-pool entry; omitted (false) preserves the replace-login default.
   const query = options?.addAccount ? '?add_account=true' : ''
+
   return window.hermesDesktop.api<OAuthStartResponse>({
     ...capabilityScoped(profile),
     path: `/api/providers/oauth/${encodeURIComponent(providerId)}/start${query}`,
