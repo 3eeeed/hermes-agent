@@ -305,8 +305,9 @@ def test_token_expired_with_dead_refresh_rotates_to_next_healthy(
         "the replacement account must be refreshed before the retry, "
         "otherwise its own stale token 401s and the pool empties"
     )
-    # A refreshable 401 is not terminal — account 1 cools down, it is not DEAD.
-    assert _by_id(pool, "acct1").last_status == "exhausted"
+    # Account 1's refresh grant was rejected with relogin_required: upstream (#113023)
+    # marks a terminally rejected login DEAD rather than replaying it every hour.
+    assert _by_id(pool, "acct1").last_status == "dead"
 
 
 def test_rotation_skips_a_candidate_whose_refresh_token_is_dead(
@@ -341,9 +342,11 @@ def test_rotation_skips_a_candidate_whose_refresh_token_is_dead(
         "account 2 could not refresh — rotation must step over it"
     )
     assert _usable(nxt)
-    assert _by_id(pool, "acct2").last_status == "exhausted"
-    # A failed refresh is not proof the account is revoked; don't kill it.
-    assert _by_id(pool, "acct2").last_status != "dead"
+    # A terminally-rejected refresh grant (relogin_required) means the login
+    # itself is gone, not a transient quota bench — main's fix for #113023:
+    # silently exhausting it replayed the dead token every hour at DEBUG with
+    # no visible trace that the account needs re-authentication.
+    assert _by_id(pool, "acct2").last_status == "dead"
 
 
 def test_token_invalidated_kills_only_that_credential(
