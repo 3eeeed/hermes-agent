@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -31,14 +32,38 @@ def _validated_pool_provider(provider: str) -> str:
     return normalized
 
 
+def _anthropic_token_lapsed(provider: str, entry: Any) -> bool:
+    """Gated on real expiry: a usage-route 429 must not spend the single-use refresh token."""
+    expires_at_ms = getattr(entry, "expires_at_ms", None) or 0
+    return (
+        provider == "anthropic" and bool(entry.refresh_token)
+        and bool(expires_at_ms) and expires_at_ms <= (time.time() + 120) * 1000
+    )
+
+
 def _usage_entry(provider: str, entry: Any) -> dict[str, Any]:
     """One account's quota, never its credential material. Fails open per account."""
     from agent.account_usage import fetch_account_usage
     from hermes_cli.web_routers.ops import pool_entry_account_email
 
     email = pool_entry_account_email(entry)
+
+    def _fetch(current: Any):
+        return fetch_account_usage(provider, base_url=current.runtime_base_url, api_key=current.runtime_api_key)
+
     try:
-        snapshot = fetch_account_usage(provider, base_url=entry.runtime_base_url, api_key=entry.runtime_api_key)
+        snapshot = _fetch(entry)
+        if snapshot is None and _anthropic_token_lapsed(provider, entry):
+            # Pool enumeration never refreshes, so once the ~8h access token lapses
+            # between chat turns every read 401s and the menu shows "unavailable"
+            # although the login is fine. Refresh THIS entry (never an ambient/other
+            # one) through the pool's locked, single-use-safe path and retry once.
+            from agent.credential_pool import load_pool
+
+            refreshed = load_pool(provider).try_refresh_matching(credential_id=entry.id)
+            if refreshed is not None:
+                entry = refreshed
+                snapshot = _fetch(entry)
     except Exception:
         _log.debug("%s usage lookup failed for pool entry %s", provider, entry.id, exc_info=True)
         snapshot = None
