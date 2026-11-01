@@ -330,6 +330,29 @@ async def stop_gateway(profile: Optional[str] = None, interrupt: bool = False):
 # once froze the uvicorn loop for 17 minutes. Every pool load below runs off-loop.
 
 
+def pool_entry_account_email(entry: Any) -> Optional[str]:
+    """Best-effort account email from the OAuth access token's own claims.
+
+    Distinct accounts can carry an identical, operator-chosen ``label``, so the
+    label alone cannot tell two entries apart. Codex tokens carry the email under
+    the nested ``https://api.openai.com/profile`` claim. Fails open (None) for
+    non-JWT tokens (Anthropic OAuth) — a display nicety, never load-bearing.
+    """
+    from hermes_cli.auth_constants import _decode_jwt_claims
+
+    token = entry.access_token or ""
+    if not token:
+        return None
+    claims = _decode_jwt_claims(token)
+    profile = claims.get("https://api.openai.com/profile")
+    if isinstance(profile, dict):
+        email = profile.get("email")
+        if isinstance(email, str) and email.strip():
+            return email.strip()
+    email = claims.get("email")
+    return email.strip() if isinstance(email, str) and email.strip() else None
+
+
 def _pool_entry_summary(entry: Any, index: int) -> dict[str, Any]:
     """Redacted view of one PooledCredential; ``index`` is 1-based to match
     CredentialPool.remove_index()."""
@@ -338,6 +361,7 @@ def _pool_entry_summary(entry: Any, index: int) -> dict[str, Any]:
         "index": index,
         "id": entry.id,
         "label": entry.label,
+        "email": pool_entry_account_email(entry),
         "auth_type": entry.auth_type,
         "source": entry.source,
         "priority": entry.priority,

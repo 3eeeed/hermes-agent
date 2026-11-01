@@ -3,7 +3,7 @@ import { useState } from 'react'
 
 import { StableText } from '@/components/chat/stable-text'
 import { useViewedInterval } from '@/hooks/use-viewed-interval'
-import type { UsageStats } from '@/types/hermes'
+import type { CredentialPoolUsageWindow, UsageStats } from '@/types/hermes'
 
 export function formatDuration(elapsedMs: number): string {
   const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
@@ -57,6 +57,41 @@ export function contextBarLabel(usage: UsageStats): string {
   const pct = Math.max(0, Math.min(100, Math.round(usage.context_percent ?? 0)))
 
   return `[${contextBar(usage.context_percent)}] ${usage.context_estimated ? '~' : ''}${pct}%`
+}
+
+/** Account pools owned by the status line. Other providers must not leave a
+ * stale Codex/Claude chip visible while they are serving the focused chat. */
+export type PoolStatusbarProvider = 'anthropic' | 'openai-codex'
+
+export function activePoolStatusbarProvider(provider: null | string | undefined): PoolStatusbarProvider | null {
+  const normalized = (provider ?? '').trim().toLowerCase()
+
+  return normalized === 'anthropic' || normalized === 'openai-codex' ? normalized : null
+}
+
+/** Compact active-account label plus the consumed five-hour/session allowance. */
+export function pooledAccountUsageLabel(
+  providerLabel: string,
+  accountLabel: string,
+  windows: readonly CredentialPoolUsageWindow[] = []
+): string {
+  const base = `${providerLabel} · ${accountLabel}`
+
+  const session = windows.find(window => {
+    const label = window.label.trim().toLowerCase()
+
+    return label === 'current session' || label === 'session'
+  })
+
+  const rawPercent = session?.used_percent
+
+  if (typeof rawPercent !== 'number' || !Number.isFinite(rawPercent)) {
+    return base
+  }
+
+  const percent = Math.round(Math.max(0, Math.min(100, rawPercent)) * 10) / 10
+
+  return `${base} · ${percent}% used`
 }
 
 /** `87%` for a reported hit rate; '' when the backend omitted it (no cache

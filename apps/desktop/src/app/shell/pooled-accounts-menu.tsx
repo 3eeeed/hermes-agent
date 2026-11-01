@@ -1,5 +1,5 @@
 import type { PooledAccountsController } from '@/app/shell/hooks/use-pooled-accounts'
-import { CheckCircle2, Plus, X } from '@/lib/icons'
+import { CheckCircle2, Pencil, Plus, X } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 
 /**
@@ -28,12 +28,17 @@ export function PooledAccountsMenu({
     deleting,
     labelFor,
     pasteCode,
+    renameCandidate,
+    renameError,
+    renaming,
     select,
     setDeleteCandidate,
     setDeleteError,
     setPasteCode,
+    setRenameCandidate,
     startAdd,
     submitPastedCode,
+    submitRename,
     usageById,
     usageLoading
   } = controller
@@ -62,6 +67,7 @@ export function PooledAccountsMenu({
         const label = labelFor(entry, index)
         const usage = usageById.get(entry.id)
         const pendingDelete = deleteCandidate?.id === entry.id
+        const pendingRename = renameCandidate?.id === entry.id
         const selected = activeCredentialId === entry.id
 
         return (
@@ -78,7 +84,7 @@ export function PooledAccountsMenu({
             <button
               aria-pressed={selected}
               className={cn(
-                'block w-full space-y-1.5 rounded px-2 py-2 pr-7 text-left text-xs transition-colors hover:bg-accent/40',
+                'block w-full space-y-1.5 rounded px-2 py-2 pr-12 text-left text-xs transition-colors hover:bg-accent/40',
                 selected && 'bg-primary/10'
               )}
               onClick={() => select(entry.id)}
@@ -90,8 +96,23 @@ export function PooledAccountsMenu({
                   <span className="truncate">{label}</span>
                   {selected && <span className="shrink-0 rounded bg-primary px-1.5 py-0.5 text-[0.625rem] font-bold tracking-wide text-primary-foreground">ACTIVE</span>}
                 </span>
-                <span className="shrink-0 text-(--ui-text-tertiary)">{usage?.plan ?? entry.last_status ?? 'Checking…'}</span>
+                {/* Anthropic's usage endpoint reports no plan name at all, so a
+                    bare `?? 'Checking…'` left every Claude row stuck on
+                    "Checking…" forever even though its quota had arrived.
+                    The placeholder belongs to the pending state only. */}
+                <span className="shrink-0 text-(--ui-text-tertiary)">
+                  {usage?.plan ?? entry.last_status ?? (usage ? '' : 'Checking…')}
+                </span>
               </div>
+
+              {/* The account's real email, decoded from its own token — not the
+                  (freely renameable) label. Two rows can share a label like "1";
+                  this is the only way to tell which underlying account each one
+                  actually is. Omitted when the provider's token carries none
+                  (Anthropic) rather than showing a misleading blank line. */}
+              {(usage?.email ?? entry.email) && (
+                <div className="truncate text-[0.6875rem] text-(--ui-text-tertiary)">{usage?.email ?? entry.email}</div>
+              )}
 
               {usage?.available && usage.windows?.length
                 ? usage.windows.map(window => {
@@ -120,18 +141,81 @@ export function PooledAccountsMenu({
               {usage?.details?.map(detail => <div className="text-[0.6875rem] text-(--ui-text-tertiary)" key={detail}>{detail}</div>)}
             </button>
 
-            <button
-              aria-label={`Remove ${label}`}
-              className="absolute right-1 top-1 rounded p-1 text-(--ui-text-tertiary) transition-colors hover:bg-destructive/15 hover:text-destructive"
-              onClick={() => {
-                setDeleteError(null)
-                setDeleteCandidate({ id: entry.id, label })
-              }}
-              title={`Remove ${label}`}
-              type="button"
-            >
-              <X className="size-3" />
-            </button>
+            <div className="absolute right-1 top-1 flex items-center gap-0.5">
+              <button
+                aria-label={`Rename ${label}`}
+                className="rounded p-1 text-(--ui-text-tertiary) transition-colors hover:bg-accent/40 hover:text-foreground"
+                onClick={() => {
+                  setDeleteCandidate(null)
+                  // Seed with the CURRENT label so the common edit (append a
+                  // name to what is already there) starts from the real value
+                  // rather than an empty box.
+                  setRenameCandidate({ id: entry.id, label })
+                }}
+                title={`Rename ${label}`}
+                type="button"
+              >
+                <Pencil className="size-3" />
+              </button>
+
+              <button
+                aria-label={`Remove ${label}`}
+                className="rounded p-1 text-(--ui-text-tertiary) transition-colors hover:bg-destructive/15 hover:text-destructive"
+                onClick={() => {
+                  setDeleteError(null)
+                  setRenameCandidate(null)
+                  setDeleteCandidate({ id: entry.id, label })
+                }}
+                title={`Remove ${label}`}
+                type="button"
+              >
+                <X className="size-3" />
+              </button>
+            </div>
+
+            {/* Renaming is inline for the same reason deletion is: this panel
+                lives inside a dropdown, and a Dialog opened from here unmounts
+                with it. */}
+            {pendingRename && (
+              <div className="space-y-2 border-t border-(--ui-stroke-secondary) px-2 py-2 text-xs">
+                <input
+                  aria-label={`New name for ${label}`}
+                  autoFocus
+                  className="w-full rounded border border-(--ui-stroke-secondary) bg-transparent px-2 py-1 text-xs text-foreground"
+                  disabled={renaming}
+                  onChange={event => setRenameCandidate({ id: entry.id, label: event.target.value })}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter') {
+                      void submitRename()
+                    } else if (event.key === 'Escape') {
+                      setRenameCandidate(null)
+                    }
+                  }}
+                  placeholder="Whose account is this?"
+                  spellCheck={false}
+                  value={renameCandidate.label}
+                />
+                {renameError && <div className="text-destructive">{renameError}</div>}
+                <div className="flex justify-end gap-2">
+                  <button
+                    className="rounded px-2 py-1 text-(--ui-text-secondary) transition-colors hover:bg-accent/40"
+                    disabled={renaming}
+                    onClick={() => setRenameCandidate(null)}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="rounded bg-primary px-2 py-1 font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-60"
+                    disabled={renaming || !renameCandidate.label.trim()}
+                    onClick={() => void submitRename()}
+                    type="button"
+                  >
+                    {renaming ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Confirmation lives inline instead of in a modal: this panel is
                 inside a dropdown, and opening a Dialog from here closes the

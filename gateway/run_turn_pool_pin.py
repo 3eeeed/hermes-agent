@@ -29,11 +29,15 @@ def apply_session_pool_pin(agent: Any, runner: Any, session_id: str | None) -> N
     pool = getattr(agent, "credential_pool", None) or getattr(agent, "_credential_pool", None)
     pin_key = POOL_PIN_KEYS.get(getattr(pool, "provider", "") if pool is not None else "")
 
+    # Remembered so a later 429 in this turn refuses to silently rotate the session onto
+    # a DIFFERENT account than the one the user picked (recover_with_credential_pool's pin guard).
+    agent._session_pinned_credential_id = None
     if pin_key and session_id:
         store = _runner_session_db(runner)
         selected_credential_id = (
             store.get_session_model_config_value(session_id, pin_key) if store else None
         )
+        agent._session_pinned_credential_id = selected_credential_id or None
         if selected_credential_id and pool is not None:
             selected_entry = next(
                 (entry for entry in pool.entries() if entry.id == selected_credential_id), None
