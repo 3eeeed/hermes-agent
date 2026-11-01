@@ -753,6 +753,13 @@ def _apply_session_credential_selection(session: dict, agent) -> None:
         if db is None:
             raise RuntimeError("Cannot verify the selected account: session database unavailable.")
         selected_id = db.get_session_model_config_value(session_key, pin_key)
+    # Remembered so a later 401/429 mid-turn can refuse to silently rotate this
+    # session onto a DIFFERENT account than the one the user picked (desktop
+    # account menu) — see recover_with_credential_pool's pin guard. The gateway's
+    # own turn path (gateway/run_turn_runner.py) sets this already; the desktop's
+    # path did not, so a dead/rate-limited pinned credential rotated here without
+    # surfacing anything to the user (#116402).
+    agent._session_pinned_credential_id = selected_id or None
     if selected_id:
         entry = next((e for e in pool.entries() if e.id == selected_id), None) if pool else None
         if entry is None:
