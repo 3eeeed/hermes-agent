@@ -255,6 +255,7 @@ import { createHudSnapShortcut } from './hud-snap-shortcut'
 import { buildHudWindowUrl } from './hud-url'
 import { resolveHudWindowing } from './hud-windowing'
 import { createIntroRevealWindowController } from './intro-reveal-window'
+import { JsonEtagCache } from './json-etag-cache'
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
 import { notifyLauncherWindowRevealed } from './linux-launcher-ready'
 import { createLocalBackendLifecycle, waitForTeardown } from './local-backend-lifecycle'
@@ -5515,6 +5516,9 @@ function multipartBody(upload) {
   return { body, contentType: `multipart/form-data; boundary=${boundary}` }
 }
 
+// Revalidate repeated JSON GET polls with ETag/304 (see json-etag-cache.ts).
+const jsonEtagCache = new JsonEtagCache()
+
 function fetchJson(url, token, options: any = {}) {
   // Retry policy lives in api-transport.ts: idempotent verbs retry on any
   // transient transport error; POST/PUT/DELETE only when the request provably
@@ -5540,6 +5544,11 @@ function fetchJson(url, token, options: any = {}) {
           return
         }
 
+        const etagKey =
+          String(options.method || 'GET').toUpperCase() === 'GET' && !body
+            ? jsonEtagCache.key(url, options.bearer || token)
+            : null
+
         const req = client.request(
           parsed,
           {
@@ -5547,6 +5556,7 @@ function fetchJson(url, token, options: any = {}) {
             method: options.method || 'GET',
             headers: {
               ...headersForRemoteRequest(url),
+              ...(etagKey ? jsonEtagCache.conditionalHeaders(etagKey) : {}),
               ...(options.headers || {}),
               'Content-Type': contentType,
               'X-Hermes-Session-Token': token,
@@ -5564,9 +5574,30 @@ function fetchJson(url, token, options: any = {}) {
             res.on('error', reject)
             res.on('data', chunk => chunks.push(chunk))
             res.on('end', () => {
-              const text = Buffer.concat(chunks).toString('utf8')
+              let text = Buffer.concat(chunks).toString('utf8')
+              let statusCode = res.statusCode || 500
 
-              if ((res.statusCode || 500) >= 400) {
+              if (statusCode === 304 && etagKey) {
+                const cached = jsonEtagCache.revalidated(etagKey)
+
+                if (cached === null) {
+                  // Evicted between send and reply: the transport retry resends untagged.
+                  reject(Object.assign(new Error('read ECONNRESET (etag cache miss on 304)'), { code: 'ECONNRESET' }))
+
+                  return
+                }
+
+                text = cached
+                statusCode = 200
+              } else if (etagKey) {
+                if (statusCode === 200) {
+                  jsonEtagCache.store(etagKey, res.headers.etag, text)
+                } else {
+                  jsonEtagCache.forget(etagKey)
+                }
+              }
+
+              if (statusCode >= 400) {
                 reject(httpStatusError(res.statusCode, text, res.statusMessage))
 
                 return
