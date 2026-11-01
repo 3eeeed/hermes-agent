@@ -369,6 +369,9 @@ class GatewayTurnPrepareMixin:
             if resolved_entry is None:
                 return
             session_entry = resolved_entry
+        if not strict_session:
+            from gateway.thread_session_bindings import apply_thread_session_binding
+            session_entry = await apply_thread_session_binding(self, source, session_entry, session_key)
         self._cache_session_source(session_key, source)
         if await asyncio.to_thread(self._is_telegram_topic_lane, source):
             session_entry = await self._hmwa_heal_telegram_topic_binding(source, session_entry, session_key)
