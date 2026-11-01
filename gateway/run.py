@@ -3965,7 +3965,6 @@ class GatewayRunner(
     def _set_session_env(self, context: SessionContext) -> list:
         """Set session context variables (contextvars, not os.environ, so concurrent messages can't
         overwrite each other). Returns reset tokens for ``_clear_session_env`` in a ``finally``."""
-        from gateway.channel_cwd import channel_cwd_for_runner
         from gateway.session_context import set_session_vars
         from gateway.session_detached import session_env_source
         source = session_env_source(self, context.source)
@@ -3993,7 +3992,7 @@ class GatewayRunner(
             message_id=str(source.message_id) if source.message_id else "",
             profile=getattr(source, "profile", "") or "",
             async_delivery=_async_delivery,
-            cwd=channel_cwd_for_runner(self, source) or "",
+            cwd=self._channel_cwd_for(context.source) or "",
             cron_session="", session_history_delivery=_history_delivery)
 
     def _clear_session_env(self, tokens: list) -> None:

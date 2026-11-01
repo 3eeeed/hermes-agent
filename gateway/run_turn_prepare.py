@@ -645,6 +645,11 @@ class GatewayTurnPrepareMixin:
         persistence_owner: Optional[str] = None
         title_user_message: Optional[str] = None
 
+    def _channel_cwd_for(self, source):
+        """Bound project folder for *source* (``<platform>.channel_cwds``; threads inherit the parent)."""
+        from gateway.channel_cwd import channel_cwd_for_runner
+        return channel_cwd_for_runner(self, source)
+
     def _hmwa_discord_auto_approve(self, source, session_key):
         """``discord.auto_approve: true`` -> sessions from the (allowlisted) owner in Discord run without
         approval prompts, like /yolo. The hardline blocklist and approvals.deny still apply."""
