@@ -247,6 +247,51 @@ class TestCredentialPoolEndpoints:
         ]
         assert "must-not-cross-api" not in response.text
 
+    def test_anthropic_usage_refreshes_the_same_expired_entry_instead_of_showing_unavailable(self, monkeypatch):
+        """An expired Claude access token between chat turns must not render as
+        "unavailable": the route refreshes THAT entry (by id) and retries once."""
+        from datetime import datetime, timezone
+
+        import agent.account_usage as account_usage
+        import agent.credential_pool as credential_pool
+        from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
+        from agent.credential_pool import PooledCredential
+
+        import time as _time
+
+        def _entry(token):
+            return PooledCredential(
+                provider="anthropic", id="claude-1", label="Eid", auth_type="oauth", priority=0,
+                source="manual:device_code", access_token=token, refresh_token="rt-secret",
+                expires_at_ms=int((_time.time() + (-60 if token.endswith("expired") else 3600)) * 1000),
+            )
+
+        refreshed_ids = []
+
+        class Pool:
+            def entries(self):
+                return [_entry("sk-ant-oat-expired")]
+
+            def try_refresh_matching(self, api_key_hint=None, credential_id=None):
+                refreshed_ids.append(credential_id)
+                return _entry("sk-ant-oat-fresh")
+
+        monkeypatch.setattr(credential_pool, "load_pool", lambda provider: Pool())
+        monkeypatch.setattr(
+            account_usage, "fetch_account_usage",
+            lambda provider, **kw: None if kw["api_key"] == "sk-ant-oat-expired" else AccountUsageSnapshot(
+                provider=provider, source="oauth_usage_api", fetched_at=datetime.now(timezone.utc),
+                windows=(AccountUsageWindow(label="Current session", used_percent=6.0),),
+            ),
+        )
+
+        response = self.client.get("/api/credentials/pool/anthropic/usage")
+
+        entry = response.json()["entries"][0]
+        assert entry["available"] is True and entry["windows"][0]["used_percent"] == 6.0
+        assert refreshed_ids == ["claude-1"], "must refresh exactly the failing entry, by stable id"
+        assert "sk-ant-oat" not in response.text and "rt-secret" not in response.text
+
     def test_usage_reports_whether_accounts_can_be_added_when_the_pool_is_empty(self, monkeypatch):
         """An empty pool must still say that accounts CAN be added.
 
