@@ -109,3 +109,18 @@ def test_auto_approve_is_discord_scoped_and_config_gated(platform, expected, mon
     runner._hmwa_discord_auto_approve(SessionSource(platform=Platform.DISCORD, chat_id="1", chat_type="thread",
                                                     thread_id="1", user_id="u"), "k-off")
     assert not is_session_yolo_enabled("k-off")
+
+
+def test_channel_cwds_yaml_reaches_adapter_extra_and_keys_are_registered(tmp_path, monkeypatch):
+    from pathlib import Path
+    from gateway.config import load_gateway_config
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "discord:\n  channel_cwds:\n    111: /srv/proj\n", encoding="utf-8")
+    extra = load_gateway_config().platforms[Platform.DISCORD].extra
+    assert extra["channel_cwds"] == {"111": "/srv/proj"}
+    for key in ("channel_cwds", "status_card", "auto_approve"):
+        assert key in DEFAULT_CONFIG["discord"]
+    assert "channel_cwds" in DEFAULT_CONFIG["slack"]

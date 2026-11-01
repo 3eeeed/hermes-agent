@@ -1523,6 +1523,7 @@ DEFAULT_CONFIG = {
         "ignore_other_user_mentions": False,
         "thread_require_mention": False,  # require @mention in thread replies too
         "channel_prompts": {},  # per-channel ephemeral system prompts
+        "channel_cwds": {},  # channel/thread id -> project folder (agent + session cwd); threads inherit
     },
 
     "discord": {
@@ -1562,6 +1563,9 @@ DEFAULT_CONFIG = {
         "websocket_event_max_silence_seconds": 14400,
         # per-channel ephemeral system prompts (forum parents apply to child threads)
         "channel_prompts": {},
+        "channel_cwds": {},  # channel/forum id -> project folder (agent + session cwd); threads inherit
+        "status_card": False,  # pinned per-thread status card + forum working/waiting tags each turn
+        "auto_approve": False,  # session YOLO for Discord turns; hardline blocklist + approvals.deny still apply
         # Opt-in DM role auth: DISCORD_ALLOWED_ROLES normally authorizes guild messages only (DMs
         # need DISCORD_ALLOWED_USERS). A guild ID here also authorizes DMs from that guild's members
         # holding the allowed role. Unset / "" / 0 = off.
@@ -1596,13 +1600,8 @@ DEFAULT_CONFIG = {
             "duck_gain": 0.06,  # ambient loudness while speech plays
             "speech_gain": 1.0,  # TTS / ack loudness, 0.0–1.0
             "ack_enabled": True,  # speak a short phrase before the first tool call
-            "ack_phrases": [  # picked at random; [] disables phrases
-                "Let me look into that.",
-                "One moment.",
-                "Checking on that now.",
-                "Give me a sec.",
-                "On it.",
-            ],
+            "ack_phrases": ["Let me look into that.", "One moment.", "Checking on that now.",  # random pick;
+                            "Give me a sec.", "On it."],  # [] disables phrases
         },
     },
 
