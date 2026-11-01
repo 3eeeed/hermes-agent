@@ -396,47 +396,101 @@ interface ProjectTreePayload {
   scoped_session_ids: string[]
   digest?: null | string
   unchanged?: boolean
+  /** Per-project content hashes in display order. */
+  order?: null | string[]
+  /** Delta reply: the digest it was computed against + the nodes we lack. */
+  base_digest?: null | string
+  nodes?: null | Record<string, SidebarProjectTree>
+  scoped_unchanged?: boolean
 }
 
-// The last full tree this window received, so a refresh can send its digest
-// and the backend answers "unchanged" instead of re-sending the whole tree
-// (re-read on every sessions.changed). Bound to the exact gateway, profile and
-// preview window it was fetched for; anything else asks for a full tree.
-let lastProjectTree: {
-  gateway: unknown
-  key: string
-  payload: ProjectTreePayload & { digest: string }
-} | null = null
+interface HeldProjectTree {
+  digest: string
+  order: string[]
+  payload: ProjectTreePayload
+}
+
+// The last tree this window received, so a refresh can say what it holds: the
+// backend answers "unchanged", or ships only the project nodes we lack (one
+// chat's counts move on almost every sessions.changed while it works). Bound to
+// the exact gateway, profile and preview window it was fetched for.
+let lastProjectTree: { gateway: unknown; key: string; held: HeldProjectTree } | null = null
 
 export function _resetProjectTreeDigestForTests(): void {
   lastProjectTree = null
 }
 
-async function requestProjectTree(context: ActiveProjectsContext): Promise<ProjectTreePayload> {
+/** Rebuild a tree from a delta reply against the held tree; null when it can't be. */
+export function applyProjectTreeDelta(held: HeldProjectTree, res: ProjectTreePayload): ProjectTreePayload | null {
+  if (res.base_digest !== held.digest || !res.order) {
+    return null
+  }
+
+  const byHash = new Map<string, SidebarProjectTree>()
+  held.order.forEach((hash, index) => {
+    const node = held.payload.projects[index]
+
+    if (node) {
+      byHash.set(hash, node)
+    }
+  })
+  const projects: SidebarProjectTree[] = []
+
+  for (const hash of res.order) {
+    const node = res.nodes?.[hash] ?? byHash.get(hash)
+
+    if (!node) {
+      return null
+    }
+
+    projects.push(node)
+  }
+
+  return {
+    active_id: res.active_id ?? null,
+    projects,
+    scoped_session_ids: res.scoped_unchanged ? held.payload.scoped_session_ids : (res.scoped_session_ids ?? [])
+  }
+}
+
+async function requestProjectTree(context: ActiveProjectsContext, allowDelta = true): Promise<ProjectTreePayload> {
   const previewLimit = projectTreePreviewLimit()
   const key = `${context.profile ?? ''}\u0000${previewLimit}`
-  const known = lastProjectTree?.gateway === context.gateway && lastProjectTree.key === key ? lastProjectTree : null
+  const known = allowDelta && lastProjectTree?.gateway === context.gateway && lastProjectTree.key === key ? lastProjectTree.held : null
 
   const res = await gatewayRequestOn<ProjectTreePayload>(
     context.gateway,
     'projects.tree',
-    projectParams({ preview_limit: previewLimit, ...(known ? { known_digest: known.payload.digest } : {}) }, context.profile)
+    projectParams(
+      { preview_limit: previewLimit, ...(known ? { accept_delta: true, known_digest: known.digest } : {}) },
+      context.profile
+    )
   )
 
+  let payload: ProjectTreePayload | null = res
+
   if (res.unchanged) {
-    if (known && res.digest === known.payload.digest) {
-      return known.payload
-    }
-
-    // Our copy was replaced while the request was in flight: ask again in full.
-    lastProjectTree = null
-
-    return requestProjectTree(context)
+    payload = known && res.digest === known.digest ? known.payload : null
+  } else if (res.base_digest) {
+    payload = known ? applyProjectTreeDelta(known, res) : null
   }
 
-  lastProjectTree = res.digest ? { gateway: context.gateway, key, payload: { ...res, digest: res.digest } } : null
+  if (!payload) {
+    // Our copy was replaced while the request was in flight, or the delta did
+    // not line up: ask once more for the full tree.
+    lastProjectTree = null
 
-  return res
+    return allowDelta ? requestProjectTree(context, false) : res
+  }
+
+  lastProjectTree =
+    res.digest && res.order
+      ? { gateway: context.gateway, key, held: { digest: res.digest, order: res.order, payload } }
+      : res.unchanged && known
+        ? lastProjectTree
+        : null
+
+  return payload
 }
 
 // Expanded previews need the complete existing tree window before the renderer

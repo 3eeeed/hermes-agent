@@ -95,12 +95,10 @@ def _(rid, params: dict) -> dict:
             session_limit=int(params.get("session_limit") or 2000), include_discovered=True)
         body = {"projects": tree["projects"], "active_id": active_id,
                 "scoped_session_ids": tree["scoped_session_ids"]}
-        # The Desktop re-reads the whole tree on every sessions.changed; over a
-        # remote link an unchanged ~50 KB tree was re-sent many times a minute.
-        digest = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()[:32]
-        if params.get("known_digest") == digest:
-            return _ok(rid, {"projects": [], "unchanged": True, "digest": digest})
-        return _ok(rid, {**body, "digest": digest})
+        # Re-read on every sessions.changed: answer "unchanged" or ship only the
+        # project nodes the client lacks (tui_gateway/project_tree_delta.py).
+        from tui_gateway.project_tree_delta import tree_reply
+        return _ok(rid, tree_reply(body, params.get("known_digest"), bool(params.get("accept_delta"))))
 
 
 @_projects_handler("projects.project_sessions")

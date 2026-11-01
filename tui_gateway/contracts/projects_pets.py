@@ -282,6 +282,8 @@ class ProjectsTreeParams(ProfileParams):
     #: Digest of the tree the client already holds (from a previous result's ``digest``). When the
     #: tree is unchanged the reply is ``{unchanged: true, digest}`` with no projects.
     known_digest: str | None = None
+    #: Client can rebuild a tree from ``order`` + ``nodes`` against the tree it holds.
+    accept_delta: bool | None = None
 
 
 class ProjectsTreeResult(Result):
@@ -290,6 +292,13 @@ class ProjectsTreeResult(Result):
     scoped_session_ids: list[str] = Field(default_factory=list)
     digest: str | None = None
     unchanged: bool = False
+    #: Per-project content hashes in display order (full and delta replies).
+    order: list[str] | None = None
+    #: Delta reply: the digest it was computed against, and the nodes the client lacks.
+    base_digest: str | None = None
+    nodes: dict[str, ProjectTreeNode] | None = None
+    #: Delta reply: keep the scoped_session_ids from the base tree.
+    scoped_unchanged: bool = False
 
 
 method("projects.tree", params=ProjectsTreeParams, result=ProjectsTreeResult,
