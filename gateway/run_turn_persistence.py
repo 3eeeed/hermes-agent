@@ -268,8 +268,11 @@ class GatewayTurnPersistenceMixin:
             logger.debug("runtime_footer build failed: %s", _footer_err)
             return ""
 
-    async def _hmwa_post_turn_hooks(self, hook_ctx, agent_result, response):
-        """agent:end hook, process-watcher scheduling, and watch-notification drain."""
+    async def _hmwa_post_turn_hooks(self, hook_ctx, agent_result, response, source=None, session_key=None):
+        """agent:end hook, Discord status card, process-watcher scheduling, and watch-notification drain."""
+        if source is not None:
+            from gateway.discord_status_card import schedule_status_card
+            schedule_status_card(self, source, session_key, agent_result)
         await self.hooks.emit("agent:end", {
             **hook_ctx, "response": (response or "")[:500], "model": agent_result.get("model", ""),
             "provider": agent_result.get("provider", ""),
