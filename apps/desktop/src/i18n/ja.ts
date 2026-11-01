@@ -2490,6 +2490,17 @@ export const jaOverrides = {
     goalDone: '目標達成',
     goalPaused: '目標一時停止中',
     goalWaiting: '目標待機中',
+    delegate: {
+      planning: '委任 · 計画中',
+      worker: (lane: string) => (lane ? `ワーカー実行中 (${lane})` : 'ワーカー実行中'),
+      review: 'ワーカーの変更を確認中',
+      done: '委任 · 完了',
+      interrupted: '委任 · 中断',
+      interruptedDetail: 'ワーカーの実行中にターンが停止しました。変更が不完全な可能性があります — 続行する前にファイルを確認してください。',
+      attempt: (attempt: number, max: number) => `試行 ${attempt}/${max}`,
+      changed: (count: number) => `${count} 件のファイルが変更済み`,
+      stopWorker: 'ワーカーを停止'
+    },
     subagents: count => `サブエージェント ${count} 件`,
     todos: (done, total) => `タスク ${done}/${total}`,
     previousTodos: (done, total) => `以前のタスク ${done}/${total}`,

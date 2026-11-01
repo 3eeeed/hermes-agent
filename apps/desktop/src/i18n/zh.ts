@@ -3413,6 +3413,17 @@ export const zhOverrides = {
     goalDone: '目标已完成',
     goalPaused: '目标已暂停',
     goalWaiting: '目标等待中',
+    delegate: {
+      planning: '委派 · 规划中',
+      worker: (lane: string) => (lane ? `执行者运行中 (${lane})` : '执行者运行中'),
+      review: '正在审查执行者的更改',
+      done: '委派 · 完成',
+      interrupted: '委派 · 已中断',
+      interruptedDetail: '执行者运行期间回合已停止。其修改可能不完整——继续前请检查文件。',
+      attempt: (attempt: number, max: number) => `尝试 ${attempt}/${max}`,
+      changed: (count: number) => `${count} 个文件已更改`,
+      stopWorker: '停止执行者'
+    },
     subagents: count => `${count} 个子代理`,
     todos: (done, total) => `任务 ${done}/${total}`,
     previousTodos: (done, total) => `以往任务 ${done}/${total}`,

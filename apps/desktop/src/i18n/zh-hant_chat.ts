@@ -225,6 +225,17 @@ export const zhHantChat = {
     goalDone: '目標已完成',
     goalPaused: '目標已暫停',
     goalWaiting: '目標等待中',
+    delegate: {
+      planning: '委派 · 規劃中',
+      worker: (lane: string) => (lane ? `執行者執行中 (${lane})` : '執行者執行中'),
+      review: '正在審查執行者的變更',
+      done: '委派 · 完成',
+      interrupted: '委派 · 已中斷',
+      interruptedDetail: '執行者執行期間回合已停止。其修改可能不完整——繼續前請檢查檔案。',
+      attempt: (attempt: number, max: number) => `嘗試 ${attempt}/${max}`,
+      changed: (count: number) => `${count} 個檔案已變更`,
+      stopWorker: '停止執行者'
+    },
     subagents: count => `${count} 個子代理`,
     todos: (done, total) => `任務 ${done}/${total}`,
     previousTodos: (done, total) => `先前任務 ${done}/${total}`,

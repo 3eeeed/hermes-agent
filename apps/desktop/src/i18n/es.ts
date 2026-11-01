@@ -3949,6 +3949,17 @@ export const esOverrides = {
     goalDone: 'Objetivo completado',
     goalPaused: 'Objetivo en pausa',
     goalWaiting: 'Objetivo esperando',
+    delegate: {
+      planning: 'Delegar · planificando',
+      worker: (lane: string) => (lane ? `Trabajador en curso (${lane})` : 'Trabajador en curso'),
+      review: 'Revisando los cambios del trabajador',
+      done: 'Delegar · listo',
+      interrupted: 'Delegar · interrumpido',
+      interruptedDetail: 'El turno se detuvo mientras un trabajador estaba en curso. Sus cambios pueden estar incompletos: revisa los archivos antes de continuar.',
+      attempt: (attempt: number, max: number) => `intento ${attempt}/${max}`,
+      changed: (count: number) => `${count} archivo(s) cambiado(s) hasta ahora`,
+      stopWorker: 'Detener trabajador'
+    },
     subagents: count => `${count} subagente${count === 1 ? '' : 's'}`,
     todos: (done, total) => `Tareas ${done}/${total}`,
     previousTodos: (done, total) => `Tareas anteriores ${done}/${total}`,

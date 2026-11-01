@@ -3969,6 +3969,17 @@ export const frOverrides = {
     goalDone: 'Objectif terminé',
     goalPaused: 'Objectif en pause',
     goalWaiting: 'Objectif en attente',
+    delegate: {
+      planning: 'Déléguer · planification',
+      worker: (lane: string) => (lane ? `Agent en cours (${lane})` : 'Agent en cours'),
+      review: 'Vérification des changements de l’agent',
+      done: 'Déléguer · terminé',
+      interrupted: 'Déléguer · interrompu',
+      interruptedDetail: 'Le tour s’est arrêté pendant qu’un agent travaillait. Ses modifications peuvent être partielles — vérifiez les fichiers avant de continuer.',
+      attempt: (attempt: number, max: number) => `tentative ${attempt}/${max}`,
+      changed: (count: number) => `${count} fichier(s) modifié(s) jusqu’ici`,
+      stopWorker: 'Arrêter l’agent'
+    },
     subagents: count => `${count} sous-agent${count === 1 ? '' : 's'}`,
     todos: (done, total) => `Tâches ${done}/${total}`,
     previousTodos: (done, total) => `Tâches précédentes ${done}/${total}`,

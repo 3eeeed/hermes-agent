@@ -2740,6 +2740,17 @@ export const ruOverrides = {
     goalDone: 'Цель выполнена',
     goalPaused: 'Цель на паузе',
     goalWaiting: 'Цель ожидает',
+    delegate: {
+      planning: 'Делегирование · планирование',
+      worker: (lane: string) => (lane ? `Исполнитель работает (${lane})` : 'Исполнитель работает'),
+      review: 'Проверка изменений исполнителя',
+      done: 'Делегирование · готово',
+      interrupted: 'Делегирование · прервано',
+      interruptedDetail: 'Ход остановился, пока работал исполнитель. Его правки могут быть неполными — проверьте файлы перед продолжением.',
+      attempt: (attempt: number, max: number) => `попытка ${attempt}/${max}`,
+      changed: (count: number) => `${count} файл(ов) изменено`,
+      stopWorker: 'Остановить исполнителя'
+    },
     subagents: count => `${count} ${RU_PLURAL(count, 'субагент', 'субагента', 'субагентов')}`,
     todos: (done, total) => `Задачи ${done}/${total}`,
     previousTodos: (done, total) => `Прошлые задачи ${done}/${total}`,

@@ -3960,6 +3960,17 @@ export const deOverrides = {
     goalDone: 'Ziel erledigt',
     goalPaused: 'Ziel pausiert',
     goalWaiting: 'Ziel wartet',
+    delegate: {
+      planning: 'Delegieren · Planung',
+      worker: (lane: string) => (lane ? `Worker läuft (${lane})` : 'Worker läuft'),
+      review: 'Änderungen des Workers prüfen',
+      done: 'Delegieren · fertig',
+      interrupted: 'Delegieren · unterbrochen',
+      interruptedDetail: 'Der Durchgang stoppte, während ein Worker lief. Seine Änderungen können unvollständig sein — prüfe die Dateien, bevor du weitermachst.',
+      attempt: (attempt: number, max: number) => `Versuch ${attempt}/${max}`,
+      changed: (count: number) => `${count} Datei(en) bisher geändert`,
+      stopWorker: 'Worker stoppen'
+    },
     subagents: count => `${count} Subagent${count === 1 ? '' : 'en'}`,
     todos: (done, total) => `Aufgaben ${done}/${total}`,
     previousTodos: (done, total) => `Frühere Aufgaben ${done}/${total}`,
