@@ -337,6 +337,18 @@ def _resolve_child_credential_pool(
             logger.debug("Could not load credential pool for child provider '%s': %s", effective_provider, exc)
     return None
 
+def _inherited_session_credential_id(parent_agent, child_provider: Optional[str]) -> Optional[str]:
+    """The parent chat's pinned pool account when the child runs on that same pin-able provider.
+
+    A different provider has no notion of the parent's account; an unpinned parent keeps pool order.
+    """
+    from agent.credential_pool import POOL_PIN_KEYS
+    parent_provider = getattr(parent_agent, "provider", None) or ""
+    if not child_provider or child_provider != parent_provider or child_provider not in POOL_PIN_KEYS:
+        return None
+    pinned = getattr(parent_agent, "_session_pinned_credential_id", None)
+    return pinned if isinstance(pinned, str) and pinned else None
+
 def _merge_request_overrides(runtime_overrides, explicit_overrides):
     """Merge explicit ``delegation.request_overrides`` OVER runtime-derived ones. Explicit top-level keys win;
     ``extra_body`` is deep-merged ONE level so provider personality (e.g. ``thinking: {type: disabled}``) survives

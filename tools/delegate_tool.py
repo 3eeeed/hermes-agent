@@ -31,7 +31,7 @@ from tools.delegate_tool_child_run import (
 from tools.delegate_tool_config import (
     _DEFAULT_MAX_CONCURRENT_CHILDREN, _get_child_timeout, _get_max_async_children, _get_max_concurrent_children,
     _get_max_spawn_depth, _get_oneshot_max_children, _get_orchestrator_enabled, _get_subagent_approval_callback, _get_worktree_isolation,
-    _inherit_parent_capabilities, _load_config, _merge_request_overrides, _resolve_child_credential_pool,
+    _inherit_parent_capabilities, _inherited_session_credential_id, _load_config, _merge_request_overrides, _resolve_child_credential_pool,
     _resolve_child_runtime, _resolve_delegation_credentials,
     _subagent_auto_approve, _subagent_auto_deny,
 )
@@ -347,6 +347,17 @@ def _build_child_agent(
     if child_pool is not None:
         child._credential_pool = child_pool
     pinned_id = routing_cfg.get("credential_id") if isinstance(routing_cfg, dict) else None
+    if not pinned_id and child_pool is not None:
+        # No lane account: a worker on the chat's own provider bills the account the user picked
+        # for this chat (desktop account menu), not the pool's priority-0 entry.
+        inherited_id = _inherited_session_credential_id(parent_agent, rt["provider"])
+        if inherited_id and any(e.id == inherited_id for e in child_pool.entries()):
+            pinned_id = inherited_id
+            logger.info("Worker %s inherits chat account %s:%s", getattr(child, "session_id", "?"),
+                        rt["provider"], inherited_id)
+        elif inherited_id:
+            logger.warning("Chat account %s is not in the worker's %s pool; worker uses pool selection",
+                           inherited_id, rt["provider"])
     if pinned_id:
         # A Delegate lane pinned to one account: lease exactly that entry and never rotate the
         # worker onto another account (fail visibly instead of billing a quota the user didn't pick).

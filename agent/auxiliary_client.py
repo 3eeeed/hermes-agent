@@ -1025,11 +1025,67 @@ def _load_pool_with_credentials(provider: str, note: str = "") -> Optional[Any]:
     return pool if pool and pool.has_credentials() else None
 
 
+# The account the user picked for the chat this context serves (desktop account menu), as
+# ``(provider, credential_id)``. Context-local like ``_RUNTIME_MAIN_CONTEXT`` so overlapping
+# sessions never bill each other's account; a separate var because ``call_llm(main_runtime=...)``
+# rebinds the runtime dict per call and must not drop the session's account with it.
+_SESSION_POOL_CREDENTIAL: contextvars.ContextVar[Optional[Tuple[str, str]]] = (
+    contextvars.ContextVar("auxiliary_session_pool_credential", default=None)
+)
+
+
+def bind_session_pool_credential(provider: Any, credential_id: Any) -> contextvars.Token:
+    """Bind this context's pinned pool account; only providers with a session pin key count."""
+    from agent.credential_pool import POOL_PIN_KEYS
+    provider = str(provider or "").strip().lower()
+    credential_id = str(credential_id or "").strip()
+    pinned = (provider, credential_id) if provider in POOL_PIN_KEYS and credential_id else None
+    return _SESSION_POOL_CREDENTIAL.set(pinned)
+
+
+@contextlib.contextmanager
+def scoped_session_pool_credential(provider: Any, credential_id: Any):
+    token = bind_session_pool_credential(provider, credential_id)
+    try:
+        yield
+    finally:
+        _SESSION_POOL_CREDENTIAL.reset(token)
+
+
+def _session_pinned_credential_id(provider: str) -> Optional[str]:
+    pinned = _SESSION_POOL_CREDENTIAL.get()
+    return pinned[1] if pinned and pinned[0] == provider else None
+
+
+def _session_pinned_pool_entry(provider: str, pool: Any) -> Optional[Any]:
+    """The bound session account's entry when usable (cooldown lifted, token fresh), else None.
+
+    ``reclaim`` never bumps request_count/round-robin order, so aux calls don't reorder the pool.
+    """
+    pinned_id = _session_pinned_credential_id(provider)
+    if not pinned_id:
+        return None
+    entry = None
+    try:
+        entry = pool.reclaim(pinned_id)
+    except Exception as exc:
+        logger.debug("Auxiliary client: could not reclaim pinned %s entry %s: %s", provider, pinned_id, exc)
+    if entry is None:
+        logger.warning(
+            "Auxiliary client: session account %s for %s is missing or unavailable; "
+            "falling back to pool selection", pinned_id, provider,
+        )
+    return entry
+
+
 def _select_pool_entry(provider: str) -> tuple[bool, Optional[Any]]:
-    """Return (pool_exists_for_provider, selected_entry)."""
+    """Return (pool_exists_for_provider, selected_entry); the session's pinned account wins."""
     pool = _load_pool_with_credentials(provider)
     if pool is None:
         return False, None
+    pinned = _session_pinned_pool_entry(provider, pool)
+    if pinned is not None:
+        return True, pinned
     try:
         return True, pool.select()
     except Exception as exc:
@@ -1046,6 +1102,10 @@ def _peek_pool_entry(provider: str, pool: Any = None) -> Optional[Any]:
         pool = _load_pool_with_credentials(provider, " (peek)")
     if pool is None:
         return None
+    if _session_pinned_credential_id(provider):
+        pinned = _session_pinned_pool_entry(provider, pool)
+        if pinned is not None:
+            return pinned
     try:
         current_fn = getattr(pool, "current", None)
         current = current_fn() if callable(current_fn) else None

@@ -42,7 +42,7 @@ class TurnFacadeMixin:
 
         from agent import relay_runtime
         from agent.aux_accounting import reset_accounting_context, set_accounting_context
-        from agent.auxiliary_client import scoped_runtime_main
+        from agent.auxiliary_client import scoped_runtime_main, scoped_session_pool_credential
         from agent.conversation_loop import run_conversation
         from agent.portal_tags import (
             reset_affinity_scope, reset_conversation_context, set_affinity_scope,
@@ -141,7 +141,10 @@ class TurnFacadeMixin:
 
             # Keep the ContextVar scope local (agent tokens may be observed from another thread).
             # A host that owns this thread (Hermes Console) may cancel the turn cross-thread.
-            with bind_subagent_parent(self), scoped_runtime_main({}), track_in_interrupt_scope(self):
+            with (
+                bind_subagent_parent(self), scoped_runtime_main({}), scoped_session_pool_credential(None, None),
+                track_in_interrupt_scope(self),
+            ):
                 try:
                     if lease is not None:
                         lease.start()

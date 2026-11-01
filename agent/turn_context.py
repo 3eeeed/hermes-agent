@@ -551,6 +551,13 @@ def _publish_runtime_main(agent: Any) -> None:
             )},
             cache_scope=_cache_scope,
         )
+    with suppress(Exception):
+        # Aux calls for a chat pinned to one pool account (desktop account menu) bill that account,
+        # not the pool's priority-0 entry. The turn facade scopes this var, so it ends with the turn.
+        from agent.auxiliary_client import bind_session_pool_credential
+        bind_session_pool_credential(
+            _str_attr(agent, "provider"), getattr(agent, "_session_pinned_credential_id", None)
+        )
 
 
 def _refresh_mcp_tools_between_turns(agent: Any) -> None:
