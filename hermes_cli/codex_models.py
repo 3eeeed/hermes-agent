@@ -230,3 +230,38 @@ def get_codex_model_ids(access_token: Optional[str] = None, base_url: Optional[s
     return CuratedFallbackModels(_finalize_codex_models(_drop_undiscovered_astra(_dedupe([
         *([default_model] if default_model else []), *_read_cache_models(codex_home),
         *DEFAULT_CODEX_MODELS]))))
+
+
+def _pooled_catalog_routes(singleton_token: Optional[str], singleton_base: Optional[str]) -> list[tuple[str, Optional[str]]]:
+    """``(token, route base)`` for the singleton plus every pooled Codex account, read-only.
+
+    Entitlements are account-scoped and the singleton can lag the pool (or belong to an account
+    with a narrower rollout), so the picker asks every configured account. Each pool row keeps the
+    host its key routes to (#121486); expiring tokens are skipped (a picker never refreshes)."""
+    from hermes_cli.auth import _codex_access_token_is_expiring, read_credential_pool
+    from hermes_cli.auth_codex import _codex_pool_route_base_url
+
+    routes: list[tuple[str, Optional[str]]] = [(singleton_token, singleton_base)] if singleton_token else []
+    try:
+        for entry in read_credential_pool("openai-codex") or ():
+            token = str(entry.get("access_token") or "").strip() if isinstance(entry, dict) else ""
+            if token and not _codex_access_token_is_expiring(token, 0):
+                routes.append((token, _codex_pool_route_base_url(str(entry.get("base_url") or ""))))
+    except Exception:
+        logger.debug("Codex pool catalog credential lookup failed", exc_info=True)
+    unique: dict[str, tuple[str, Optional[str]]] = {}
+    for token, base in routes:
+        unique.setdefault(token, (token, base))
+    return list(unique.values())
+
+
+def union_codex_account_models(singleton_token: Optional[str], singleton_base: Optional[str]) -> list[str]:
+    """Union of every configured account's live Codex catalog (singleton first), or the curated
+    fallback from ``get_codex_model_ids`` when no account answers."""
+    discovered: list[str] = []
+    for token, base in _pooled_catalog_routes(singleton_token, singleton_base):
+        try:
+            discovered = _dedupe([*discovered, *_fetch_models_from_api(token, base_url=base)])
+        except Exception:
+            logger.debug("Codex pooled-account model discovery failed", exc_info=True)
+    return discovered or get_codex_model_ids(access_token=singleton_token, base_url=singleton_base)
