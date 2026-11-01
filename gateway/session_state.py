@@ -48,6 +48,7 @@ class ConversationState:
     model_override: Optional[dict[str, Any]] = None  # /model per-session override
     one_turn_restore: Optional[dict[str, Any]] = None  # /model --once snapshot
     reasoning_override: Optional[dict[str, Any]] = None  # /reasoning override
+    delegate_mode: bool = False  # /delegate on: every turn in this chat runs as a Delegate turn
     service_tier_override: Any = _UNSET_TIER  # /fast: "priority" or None; _UNSET_TIER = absent
     last_resolved_model: str = ""  # last successfully-resolved non-empty model
     queued_events: list[Any] = field(default_factory=list)  # /queue overflow FIFO (head in adapter)

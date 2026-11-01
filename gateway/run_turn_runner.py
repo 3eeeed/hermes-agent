@@ -7,6 +7,7 @@ keeps intercepting them at call time.
 
 from __future__ import annotations
 
+import contextlib
 import asyncio
 import dataclasses
 import json
@@ -104,6 +105,14 @@ def _persisted_turn(agent, agent_history, result, compressions) -> dict | None:
 class _NoStreamConsumer(RuntimeError):
     """Raised by the delta callback when nothing consumed the text; ``_call_quietly`` turns it into
     'not delivered' so the agent's partial-delivery accounting matches what the user saw."""
+
+
+def _prepend_delegate_note(message, note: str):
+    """The orchestrator's per-turn instructions ride the user message (never the system prompt,
+    which must stay byte-stable for caching); multimodal content gets a leading text part."""
+    if isinstance(message, list):
+        return [{"type": "text", "text": note}, *message]
+    return f"{note}\n\n{message}"
 
 
 class _ExecApprovalDeclined(RuntimeError):
@@ -1030,7 +1039,13 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 agent._silence_marker_needs_reply = not silence_allowed(
                     ctx.persist_user_display_kind, ctx.reply_expected)
                 try:
-                    result = agent.run_conversation(api_message, **kwargs)
+                    with self._delegate_turn(agent) as delegate_note:
+                        if delegate_note:
+                            # The transcript keeps what the user sent; only the model input carries the note.
+                            kwargs.setdefault("persist_user_message", ctx.message)
+                            api_message = _prepend_delegate_note(api_message, delegate_note)
+                        result = agent.run_conversation(api_message, **kwargs)
+                        self._mark_delegate_result(result)
                 finally:
                     agent._silence_marker_needs_reply = False
             if captured is not None:
@@ -1048,6 +1063,41 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 from tools.clarify_gateway import clear_session
                 clear_session(session_key)
             reset_current_session_key(token)
+
+    @contextlib.contextmanager
+    def _delegate_turn(self, agent):
+        """Arm a Delegate turn when /delegate is on for this chat; yield the orchestrator note."""
+        ctx = self._ctx
+        session_key = ctx.session_key or ""
+        if not self._runner._delegate_enabled(session_key):
+            yield None
+            return
+        from agent.delegate_orchestrator import orchestrator_turn, turn_note
+        from gateway.slash_commands_delegate import load_delegate_options, phase_line
+        options, problem = load_delegate_options(self._runner._load_delegate_config())
+        if options is None:
+            # Settings vanished or broke after /delegate on: say so and run this turn as Normal.
+            self._schedule(self._runner._deliver_platform_notice(ctx.source, f"⚠️ {problem} Running as Normal."),
+                           "delegate settings notice scheduling error")
+            yield None
+            return
+
+        def _on_phase(info):
+            line = phase_line(info)
+            if line and ctx._run_still_current():
+                self._schedule(self._runner._deliver_platform_notice(ctx.source, line), "delegate phase notice error")
+
+        with orchestrator_turn(agent, str(ctx.session_id or session_key), options, on_phase=_on_phase) as turn:
+            self._delegate_state = turn
+            try:
+                yield turn_note(options)
+            finally:
+                self._delegate_state = None
+
+    def _mark_delegate_result(self, result) -> None:
+        turn = getattr(self, "_delegate_state", None)
+        if turn is not None:
+            turn.interrupted = not isinstance(result, dict) or bool(result.get("interrupted"))
 
     def _finish_stream_consumer(self, result, agent_history, stream_consumer):
         ctx = self._ctx
