@@ -20,7 +20,23 @@ def selection(monkeypatch):
     )
     session = {"agent": agent, "session_key": "stored-session"}
     monkeypatch.setattr(server, "_session_db", lambda s: contextlib.nullcontext(db))
+    import agent.credential_pool as credential_pool
+    monkeypatch.setattr(credential_pool, "load_pool", lambda provider: SimpleNamespace(entries=lambda: entries))
     return session, agent, db, entries
+
+
+def test_account_added_after_the_agent_was_cached_can_be_selected(selection, monkeypatch):
+    """A cached agent's in-memory pool predates an account added from the menu;
+    picking that account must reload the pool, not report it unavailable."""
+    session, agent, db, entries = selection
+    added = SimpleNamespace(id="added-later")
+    fresh = SimpleNamespace(entries=lambda: [*entries, added])
+    import agent.credential_pool as credential_pool
+    monkeypatch.setattr(credential_pool, "load_pool", lambda provider: fresh)
+    db.get_session_model_config_value.return_value = "added-later"
+    server._apply_session_credential_selection(session, agent)
+    agent._swap_credential.assert_called_with(added)
+    assert agent._credential_pool is fresh
 
 
 def test_desktop_applies_pin_and_reloads_it_each_turn(selection):

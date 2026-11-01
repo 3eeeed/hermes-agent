@@ -781,6 +781,37 @@ _POOL_STATUS_FIELDS = (
     "last_error_reset_at")
 
 
+_POOL_TOKEN_FIELDS = ("access_token", "refresh_token", "expires_at_ms", "expires_at", "last_refresh")
+
+
+def _token_freshness(entry: Dict[str, Any]) -> float:
+    """Rotation recency of an OAuth pair: its expiry (Anthropic) or last refresh (Codex/xAI)."""
+    from agent.credential_pool import _parse_absolute_timestamp
+
+    expires_ms = entry.get("expires_at_ms")
+    if isinstance(expires_ms, (int, float)) and expires_ms > 0:
+        return float(expires_ms) / 1000.0
+    return _parse_absolute_timestamp(entry.get("expires_at")) or _parse_absolute_timestamp(
+        entry.get("last_refresh")) or 0.0
+
+
+def _keep_newer_disk_tokens(entry: Dict[str, Any], disk_entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Never let a stale in-memory snapshot overwrite a pair another process rotated.
+
+    Refresh tokens are single-use: once process B rotates a row, the pair process A loaded
+    earlier is revoked upstream. A later ``_persist`` from A (triggered by an unrelated
+    rotation/cooldown on ANY row) used to write A's revoked pair back over B's fresh one,
+    so every process then hit ``invalid_grant`` and the account looked "signed out".
+    The newer pair wins together with its status (A's status describes the dead pair)."""
+    if not isinstance(disk_entry, dict) or not disk_entry.get("refresh_token"):
+        return entry
+    same = all((entry.get(f) or "") == (disk_entry.get(f) or "") for f in ("access_token", "refresh_token"))
+    if same or _token_freshness(disk_entry) <= _token_freshness(entry):
+        return entry
+    kept = {**entry, **{f: disk_entry.get(f) for f in _POOL_TOKEN_FIELDS if f in disk_entry}}
+    return {**kept, **{f: disk_entry.get(f) for f in _POOL_STATUS_FIELDS}}
+
+
 def _merge_disk_cooldown_state(
     entry: Dict[str, Any], disk_entry: Optional[Dict[str, Any]], provider_id: str,
 ) -> Dict[str, Any]:
@@ -855,7 +886,8 @@ def write_credential_pool(
         status_cleared = {cid for cid in (status_cleared_ids or ()) if cid}
         merged: List[Dict[str, Any]] = [
             _merge_disk_cooldown_state(
-                e, None if e.get("id") in status_cleared else existing_by_id.get(e.get("id")), provider_id,
+                _keep_newer_disk_tokens(e, existing_by_id.get(e.get("id"))),
+                None if e.get("id") in status_cleared else existing_by_id.get(e.get("id")), provider_id,
             )
             if isinstance(e, dict) else e
             for e in sanitized]

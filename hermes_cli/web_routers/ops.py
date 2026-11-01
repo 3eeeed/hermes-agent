@@ -377,11 +377,24 @@ def _pool_usage_payload(provider: str) -> Tuple[Callable[[Any], Dict[str, Any]],
     from agent.account_usage import fetch_account_usage
     from agent.credential_pool import load_pool
 
+    def _fetch(entry: Any):
+        return fetch_account_usage(provider, base_url=entry.runtime_base_url, api_key=entry.runtime_api_key)
+
     def _one(entry: Any) -> Dict[str, Any]:
         try:
-            snapshot = fetch_account_usage(
-                provider, base_url=entry.runtime_base_url, api_key=entry.runtime_api_key,
-            )
+            snapshot = _fetch(entry)
+            expired = (entry.expires_at_ms or 0) and entry.expires_at_ms <= (time.time() + 120) * 1000
+            if snapshot is None and provider == "anthropic" and entry.refresh_token and expired:
+                # Pool enumeration never refreshes, so once the ~8h access token
+                # lapses between chat turns every read 401s and the menu shows
+                # "unavailable" although the login is fine. Refresh THIS entry
+                # (never an ambient/other one) through the pool's locked,
+                # single-use-safe path and retry once. Gated on real expiry: a
+                # usage-route 429 must not spend the single-use refresh token.
+                refreshed = load_pool(provider).try_refresh_matching(credential_id=entry.id)
+                if refreshed is not None:
+                    entry = refreshed
+                    snapshot = _fetch(entry)
         except Exception:
             _log.debug("%s usage lookup failed for pool entry %s", provider, entry.id, exc_info=True)
             snapshot = None

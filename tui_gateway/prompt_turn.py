@@ -583,6 +583,15 @@ def _apply_session_credential_selection(session: dict, agent) -> None:
     agent._session_pinned_credential_id = selected_id or None
     if selected_id:
         entry = next((e for e in pool.entries() if e.id == selected_id), None) if pool else None
+        if entry is None and pool is not None:
+            # A cached agent holds the pool it loaded at creation; an account
+            # added from the menu afterwards is only on disk. Reload once
+            # before refusing, so picking a just-added account works.
+            from agent.credential_pool import load_pool
+            fresh = load_pool(provider)
+            entry = next((e for e in fresh.entries() if e.id == selected_id), None)
+            if entry is not None:
+                agent._credential_pool = fresh
         if entry is None:
             raise RuntimeError("The selected account is unavailable. Select an account again before sending.")
         if not agent._swap_credential(entry):
