@@ -208,7 +208,7 @@ describe('projects RPC profile forwarding', () => {
     const request = vi.fn(async (_method: string, params: Record<string, unknown>) =>
       params.known_digest === 'd1'
         ? { digest: 'd1', projects: [], unchanged: true }
-        : { active_id: 'p1', digest: 'd1', projects: tree, scoped_session_ids: ['s1'] }
+        : { active_id: 'p1', digest: 'd1', order: ['h1'], projects: tree, scoped_session_ids: ['s1'] }
     )
 
     const gateway = { connectionState: 'open', request }
@@ -220,12 +220,69 @@ describe('projects RPC profile forwarding', () => {
 
     expect(request).toHaveBeenNthCalledWith(1, 'projects.tree', { preview_limit: 3, profile: 'default' })
     expect(request).toHaveBeenNthCalledWith(2, 'projects.tree', {
+      accept_delta: true,
       known_digest: 'd1',
       preview_limit: 3,
       profile: 'default'
     })
     expect($projectTree.get()).toEqual(tree)
     expect($activeProjectId.get()).toBe('p1')
+  })
+
+  it('rebuilds a changed tree from a delta: moved, kept and new project nodes', async () => {
+    const one = { id: 'p1', label: 'One', path: null, repos: [], sessionCount: 1 } satisfies SidebarProjectTree
+    const two = { id: 'p2', label: 'Two', path: null, repos: [], sessionCount: 2 } satisfies SidebarProjectTree
+    const twoMoved = { ...two, sessionCount: 3 }
+
+    const request = vi.fn(async (_method: string, params: Record<string, unknown>) =>
+      params.known_digest === 'd1'
+        ? {
+            active_id: null,
+            base_digest: 'd1',
+            digest: 'd2',
+            nodes: { h2b: twoMoved },
+            order: ['h2b', 'h1'],
+            projects: [],
+            scoped_unchanged: true
+          }
+        : { active_id: null, digest: 'd1', order: ['h1', 'h2'], projects: [one, two], scoped_session_ids: ['s1'] }
+    )
+
+    const gateway = { connectionState: 'open', request }
+    activeGateway.mockReturnValue(gateway as never)
+    gatewayAtom.set(gateway as never)
+
+    await refreshProjectTree()
+    await refreshProjectTree()
+
+    expect($projectTree.get()).toEqual([twoMoved, one])
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+
+  it('falls back to one full read when a delta does not line up with the held tree', async () => {
+    const one = { id: 'p1', label: 'One', path: null, repos: [], sessionCount: 1 } satisfies SidebarProjectTree
+    let calls = 0
+
+    const request = vi.fn(async (_method: string, params: Record<string, unknown>) => {
+      calls += 1
+
+      if (params.known_digest === 'd1') {
+        return { active_id: null, base_digest: 'd1', digest: 'd2', nodes: {}, order: ['missing'], projects: [] }
+      }
+
+      return { active_id: null, digest: calls === 1 ? 'd1' : 'd3', order: ['h1'], projects: [one], scoped_session_ids: [] }
+    })
+
+    const gateway = { connectionState: 'open', request }
+    activeGateway.mockReturnValue(gateway as never)
+    gatewayAtom.set(gateway as never)
+
+    await refreshProjectTree()
+    await refreshProjectTree()
+
+    expect(request).toHaveBeenCalledTimes(3)
+    expect(request).toHaveBeenNthCalledWith(3, 'projects.tree', { preview_limit: 3, profile: 'default' })
+    expect($projectTree.get()).toEqual([one])
   })
 
   it('skips project reads in the all-profiles view rather than forwarding its sentinel', async () => {

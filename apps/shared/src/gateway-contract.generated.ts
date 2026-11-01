@@ -2559,6 +2559,7 @@ export interface ProjectsTreeParams {
   preview_limit?: number | null
   session_limit?: number | null
   known_digest?: string | null
+  accept_delta?: boolean | null
 }
 export interface ProjectsTreeResult {
   projects?: ProjectTreeNode[]
@@ -2566,6 +2567,10 @@ export interface ProjectsTreeResult {
   scoped_session_ids?: string[]
   digest?: string | null
   unchanged?: boolean
+  order?: string[] | null
+  base_digest?: string | null
+  nodes?: Record<string, ProjectTreeNode> | null
+  scoped_unchanged?: boolean
 }
 /** ``project_tree._project_node`` — explicit, auto (git root) or the synthetic Home bucket. */
 export interface ProjectTreeNode {
