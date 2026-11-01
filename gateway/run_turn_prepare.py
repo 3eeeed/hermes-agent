@@ -658,6 +658,8 @@ class GatewayTurnPrepareMixin:
         context = build_session_context(source, self.config, session_entry)
         # Session context variables for tools (task-local, concurrency-safe)
         _session_env_tokens = self._set_session_env(context)
+        from gateway.discord_status_card import schedule_forum_working
+        schedule_forum_working(self, source)
         from gateway.channel_cwd import bind_session_to_channel_cwd, channel_cwd_for_runner
         if _channel_cwd := channel_cwd_for_runner(self, source):
             await asyncio.to_thread(

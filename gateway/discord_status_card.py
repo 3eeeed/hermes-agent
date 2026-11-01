@@ -187,7 +187,49 @@ def schedule_status_card(runner: Any, source: Any, session_key: str, agent_resul
                 await update_status_card(adapter, thread_id, text)
             except Exception:
                 logger.debug("status card update failed", exc_info=True)
+            await set_forum_state(adapter, thread_id, "مستني رد")
 
         asyncio.get_running_loop().create_task(_run())
     except Exception:
         logger.debug("status card scheduling failed", exc_info=True)
+
+
+# --- forum post state tags (🟡 شغال / 🔵 مستني رد; ✅ خلص is set by the user and left alone) -------------
+_STATE_TAGS = ("شغال", "مستني رد")
+
+
+async def set_forum_state(adapter: Any, thread_id: str, state: str) -> None:
+    client = getattr(adapter, "_client", None)
+    if client is None:
+        return
+    try:
+        thread = client.get_channel(int(thread_id)) or await client.fetch_channel(int(thread_id))
+        forum = getattr(thread, "parent", None)
+        tags = {t.name: t for t in getattr(forum, "available_tags", []) or []}
+        if state not in tags:
+            return
+        current = list(getattr(thread, "applied_tags", []) or [])
+        if any(t.name == "خلص" for t in current):
+            return
+        keep = [t for t in current if t.name not in _STATE_TAGS]
+        wanted = keep + [tags[state]]
+        if {t.id for t in wanted} != {t.id for t in current}:
+            await thread.edit(applied_tags=wanted[:5])
+    except Exception:
+        logger.debug("forum state tag failed for %s", thread_id, exc_info=True)
+
+
+def schedule_forum_working(runner: Any, source: Any) -> None:
+    """Turn start: mark the forum post 🟡 شغال (Discord threads only, when status_card is on)."""
+    try:
+        from gateway.config import Platform
+        if getattr(source, "platform", None) != Platform.DISCORD or not getattr(source, "thread_id", None):
+            return
+        from gateway.run import _load_gateway_config
+        if not ((_load_gateway_config().get("discord") or {}).get("status_card")):
+            return
+        adapter = (getattr(runner, "adapters", None) or {}).get(Platform.DISCORD)
+        if adapter is not None:
+            asyncio.get_running_loop().create_task(set_forum_state(adapter, str(source.thread_id), "شغال"))
+    except Exception:
+        logger.debug("forum working tag scheduling failed", exc_info=True)
