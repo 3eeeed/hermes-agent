@@ -503,6 +503,27 @@ async def get_session_latest_descendant(session_id: str, profile: Optional[str] 
         "changed": bool(path and latest != path[0])}
 
 
+def _slim_for_display(message: dict) -> dict:
+    """Drop provider replay blobs no transcript renderer reads.
+
+    ``reasoning_details`` repeats the reasoning text plus an opaque signature
+    (often half a message's bytes), and ``codex_reasoning_items`` is encrypted
+    Responses-API state. Both exist only to replay a turn to the provider and
+    stay in state.db for that; the Desktop re-polls these pages, so over a
+    remote link every copy was paid many times. Reasoning given ONLY as a
+    string in ``reasoning_details`` is kept, since the Desktop renders it.
+    """
+    has_text = bool(message.get("reasoning") or message.get("reasoning_content"))
+    drop_details = has_text or not isinstance(message.get("reasoning_details"), str)
+    if not (drop_details and message.get("reasoning_details") is not None) and message.get("codex_reasoning_items") is None:
+        return message
+    slim = dict(message)
+    if drop_details:
+        slim.pop("reasoning_details", None)
+    slim.pop("codex_reasoning_items", None)
+    return slim
+
+
 def _project_for_display(messages: list) -> list:
     """Replace compaction summaries with their display-only projection."""
     from agent.compaction_display import project_compaction_message_for_display
@@ -510,6 +531,7 @@ def _project_for_display(messages: list) -> list:
 
     projected_messages = []
     for message in messages:
+        message = _slim_for_display(message)
         if not is_compaction_summary_message(message):
             projected_messages.append(message)
             continue

@@ -47,3 +47,39 @@ def test_message_pages_identify_the_serving_profile(tmp_path, monkeypatch, servi
     assert [row["content"] for row in older["messages"] + tail["messages"]] == [
         f"message-{index}" for index in range(199)
     ]
+
+
+def test_message_pages_drop_provider_replay_blobs_but_keep_renderable_reasoning(tmp_path, monkeypatch):
+    """Desktop re-polls transcript pages; the provider-only replay state (signed
+    ``reasoning_details``, encrypted ``codex_reasoning_items``) must not ride along,
+    while every field the transcript renders survives — including reasoning that
+    exists only as a ``reasoning_details`` string."""
+    from hermes_state import SessionDB
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr("hermes_state.DEFAULT_DB_PATH", home / "state.db")
+    db = SessionDB(db_path=home / "state.db")
+    try:
+        db.create_session(session_id="s", source="desktop")
+        db.append_message("s", "user", "hi")
+        db.append_message("s", "assistant", "answer", reasoning="thinking it over",
+                          reasoning_details=[{"type": "thinking", "thinking": "thinking it over",
+                                              "signature": "x" * 4000}],
+                          codex_reasoning_items=[{"encrypted_content": "y" * 4000}])
+        db.append_message("s", "assistant", "second", reasoning_details="only-detail reasoning")
+    finally:
+        db.close()
+
+    from hermes_cli.web_routers.sessions import manage_router
+
+    app = FastAPI()
+    app.include_router(manage_router)
+    with TestClient(app) as client:
+        rows = client.get("/api/sessions/s/messages?limit=120&order=latest").json()["messages"]
+
+    signed, string_only = rows[1], rows[2]
+    assert (signed["content"], signed["reasoning"]) == ("answer", "thinking it over")
+    assert "reasoning_details" not in signed and "codex_reasoning_items" not in signed
+    assert string_only["reasoning_details"] == "only-detail reasoning"

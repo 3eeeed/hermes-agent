@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { invalidateProfileScopedQueries, queryClient } from './query-client'
 
@@ -54,5 +54,26 @@ describe('invalidateProfileScopedQueries', () => {
 
     expect(invalidated(['some-future-profile-query'])).toBe(true)
     expect(invalidated([{ scope: 'weird' }])).toBe(true)
+  })
+})
+
+describe('React Query focus signal', () => {
+  it('treats a visible but unfocused window as unfocused so interval polls pause', async () => {
+    const { focusManager } = await import('@tanstack/react-query')
+    const { installWindowFocusSignal } = await import('./query-client')
+    const hasFocus = vi.spyOn(document, 'hasFocus')
+
+    installWindowFocusSignal()
+
+    hasFocus.mockReturnValue(false)
+    window.dispatchEvent(new Event('blur'))
+    expect(document.visibilityState).toBe('visible')
+    expect(focusManager.isFocused()).toBe(false)
+
+    hasFocus.mockReturnValue(true)
+    window.dispatchEvent(new Event('focus'))
+    expect(focusManager.isFocused()).toBe(true)
+
+    hasFocus.mockRestore()
   })
 })
