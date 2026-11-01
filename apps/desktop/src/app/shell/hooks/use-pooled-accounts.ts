@@ -209,7 +209,26 @@ export function usePooledAccounts(options: {
       void credentialPool.refetch()
       void accountUsage.refetch()
     } catch (error) {
-      setAddError(error instanceof Error ? error.message : 'That code was not accepted. Please try again.')
+      const raw = error instanceof Error ? error.message : ''
+      // The gateway surfaces failures as `...400: {"detail":"..."}`. Show the
+      // server's sentence rather than the transport wrapper.
+      const detail = /"detail"\s*:\s*"([^"]+)"/.exec(raw)?.[1] ?? raw
+      // A rejected code burns the session server-side, so the stale session_id
+      // would only ever answer "unknown session" on a retry. Drop back to the
+      // add button, which mints a fresh link, instead of stranding the user on
+      // a dead form.
+      const sessionIsDead = /state did not match|expired|unknown/i.test(detail)
+
+      if (sessionIsDead) {
+        setAddSession(null)
+        setPasteCode('')
+      }
+
+      setAddError(
+        sessionIsDead
+          ? `${detail || 'That code was not accepted.'} Press Add account to start again.`
+          : detail || 'That code was not accepted. Please try again.'
+      )
     }
   }
 
