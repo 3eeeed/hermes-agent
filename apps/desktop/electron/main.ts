@@ -5589,6 +5589,23 @@ function fetchJson(url, token, options: any = {}) {
 
                 text = cached
                 statusCode = 200
+              } else if (etagKey && statusCode === 200 && res.headers['x-hermes-delta-base']) {
+                const rebuilt = jsonEtagCache.resolveDelta(
+                  etagKey,
+                  res.headers['x-hermes-delta-base'],
+                  res.headers.etag,
+                  text
+                )
+
+                if (rebuilt === null) {
+                  // Base gone or hash mismatch: the cache entry was dropped, so the
+                  // transport retry asks again without a tag and gets the full body.
+                  reject(Object.assign(new Error('read ECONNRESET (etag delta rejected)'), { code: 'ECONNRESET' }))
+
+                  return
+                }
+
+                text = rebuilt
               } else if (etagKey) {
                 if (statusCode === 200) {
                   jsonEtagCache.store(etagKey, res.headers.etag, text)

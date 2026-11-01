@@ -1211,3 +1211,27 @@ def test_list_cron_jobs_carries_each_profiles_ticker_heartbeat_age(isolated_prof
 
     assert ages["default"] is None  # no heartbeat file: cannot date the last tick
     assert 25 * 3600 <= ages["worker_alpha"] < 25 * 3600 + 60
+
+
+def test_healthy_ticker_heartbeat_is_stable_across_polls_so_cron_polls_revalidate(isolated_profiles):
+    """Desktop polls the cron list every few seconds; a heartbeat age that moved every second
+    made every body differ, so ETag revalidation could never answer 304. A healthy ticker must
+    report a stable value while a stale one stays dateable."""
+    import time
+
+    home = isolated_profiles["worker_alpha"]
+    with _web_server_cron._cron_store_scope(home) as cron_jobs:
+        cron_jobs.create_job(prompt="hourly", schedule="every 1h")
+    beat = home / "cron" / "ticker_heartbeat"
+
+    def age():
+        return next(j for j in _rt_cron._list_cron_jobs_sync("all") if j["profile"] == "worker_alpha")[
+            "scheduler_heartbeat_age_s"]
+
+    beat.write_text(str(time.time() - 3))
+    first = age()
+    beat.write_text(str(time.time() - 40))
+    assert age() == first
+
+    beat.write_text(str(time.time() - 600))
+    assert age() >= 540
