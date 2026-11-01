@@ -435,9 +435,8 @@ async def add_credential_pool_entry(body: CredentialPoolAdd, profile: Optional[s
     return await config_scoped_to_thread(profile, _run)
 
 
-@router.delete("/api/credentials/pool/{provider}/{index}")
-async def remove_credential_pool_entry(provider: str, index: int, profile: Optional[str] = None):
-    """Remove a pool entry (``index`` is 1-based, as listed).
+def remove_pool_entry(provider: str, target: Any) -> dict[str, Any]:
+    """Delete one pool entry by its stable id, label, or 1-based index (as listed).
 
     Removal must be sticky: ``load_pool()`` re-seeds entries from their backing
     source (.env var, OAuth file, custom-provider config) on every call, so
@@ -446,46 +445,50 @@ async def remove_credential_pool_entry(provider: str, index: int, profile: Optio
     its external state and suppresses ``(provider, source)`` so seeders skip it.
     Manual entries have no step — nothing external, and they aren't re-seeded.
 
-    See #55217.
+    See #55217. Callers run this inside the owning profile's scope.
     """
     from agent.credential_pool import load_pool
     from agent.credential_sources import find_removal_step
     from hermes_cli.auth import suppress_credential_source
 
     provider = (provider or "").strip().lower()
+    try:
+        pool = load_pool(provider)
+        index, matched, error = pool.resolve_target(target)
+        removed = pool.remove_index(index) if matched is not None and index is not None else None
+    except Exception as exc:
+        _log.exception("DELETE /api/credentials/pool failed")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if removed is None:
+        raise HTTPException(status_code=404, detail=error or "No matching pool entry")
 
-    def _run():
+    cleaned: list[str] = []
+    hints: list[str] = []
+    step = find_removal_step(provider, removed.source or "")
+    if step is not None:
         try:
-            pool = load_pool(provider)
-            removed = pool.remove_index(index)
-        except Exception as exc:
-            _log.exception("DELETE /api/credentials/pool failed")
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if removed is None:
-            raise HTTPException(status_code=404, detail="No pool entry at that index")
-
-        cleaned: list[str] = []
-        hints: list[str] = []
-        step = find_removal_step(provider, removed.source or "")
-        if step is not None:
+            result = step.remove_fn(provider, removed)
+            cleaned = list(result.cleaned)
+            hints = list(result.hints)
+            if result.suppress:
+                suppress_credential_source(provider, removed.source)
+        except Exception:
+            # Cleanup is best-effort, but suppression is the actual fix —
+            # without it the entry resurrects on the next load_pool().
+            _log.exception("credential source cleanup failed for %s/%s; suppressing anyway", provider, removed.source)
             try:
-                result = step.remove_fn(provider, removed)
-                cleaned = list(result.cleaned)
-                hints = list(result.hints)
-                if result.suppress:
-                    suppress_credential_source(provider, removed.source)
+                suppress_credential_source(provider, removed.source)
             except Exception:
-                # Cleanup is best-effort, but suppression is the actual fix —
-                # without it the entry resurrects on the next load_pool().
-                _log.exception("credential source cleanup failed for %s/%s; suppressing anyway", provider, removed.source)
-                try:
-                    suppress_credential_source(provider, removed.source)
-                except Exception:
-                    _log.exception("suppress_credential_source failed")
-        return {"ok": True, "provider": provider, "count": len(pool.entries()), "cleaned": cleaned, "hints": hints}
+                _log.exception("suppress_credential_source failed")
+    return {"ok": True, "provider": provider, "count": len(pool.entries()), "cleaned": cleaned, "hints": hints}
 
+
+@router.delete("/api/credentials/pool/{provider}/{index}")
+async def remove_credential_pool_entry(provider: str, index: int, profile: Optional[str] = None):
+    """Remove a pool entry (``index`` is 1-based, as listed)."""
     return await config_scoped_to_thread(
-        destructive_profile(profile, "DELETE /api/credentials/pool/{provider}/{index}"), _run)
+        destructive_profile(profile, "DELETE /api/credentials/pool/{provider}/{index}"),
+        lambda: remove_pool_entry(provider, index))
 
 
 # --- Memory provider: setup is dashboard-native only via get_config_schema();
