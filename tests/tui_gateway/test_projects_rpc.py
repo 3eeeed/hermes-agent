@@ -888,3 +888,25 @@ def test_projects_without_a_profile_stay_on_the_launch_home(monkeypatch, tmp_pat
     assert not (Path(os.environ["HERMES_HOME"]) / "projects.db").exists()
 
 
+
+
+def test_projects_tree_answers_unchanged_for_the_digest_the_client_holds(monkeypatch, tmp_path):
+    """The Desktop re-reads the tree on every sessions.changed. Holding the current digest
+    costs an empty ``unchanged`` reply; any real change (a new session) ships the full tree."""
+    home = _profile_dir(tmp_path, "launch")
+    repo = tmp_path / "repos" / "digest"
+    repo.mkdir(parents=True)
+    _bind_profiles(monkeypatch, tmp_path, {"default": home})
+    _create_project(home, "Digest", repo, use=True)
+    _create_session(home, "digest-one", repo)
+
+    with _serving_launch_profile(home):
+        first = _call("projects.tree")
+        same = _call("projects.tree", {"known_digest": first["digest"]})
+        _create_session(home, "digest-two", repo)
+        moved = _call("projects.tree", {"known_digest": first["digest"]})
+
+    assert first["digest"] and not first.get("unchanged")
+    assert same == {"projects": [], "unchanged": True, "digest": first["digest"]}
+    assert not moved.get("unchanged") and moved["digest"] != first["digest"]
+    assert set(moved["scoped_session_ids"]) == {"digest-one", "digest-two"}

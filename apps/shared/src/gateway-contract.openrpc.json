@@ -21715,6 +21715,18 @@
             ],
             "default": null,
             "title": "Session Limit"
+          },
+          "known_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Known Digest"
           }
         },
         "title": "ProjectsTreeParams",
@@ -21748,11 +21760,25 @@
             },
             "title": "Scoped Session Ids",
             "type": "array"
+          },
+          "digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Digest"
+          },
+          "unchanged": {
+            "default": false,
+            "title": "Unchanged",
+            "type": "boolean"
           }
         },
-        "required": [
-          "projects"
-        ],
         "title": "ProjectsTreeResult",
         "type": "object"
       },

@@ -279,12 +279,17 @@ class ProjectTreeNode(Result):
 class ProjectsTreeParams(ProfileParams):
     preview_limit: int | None = None
     session_limit: int | None = None
+    #: Digest of the tree the client already holds (from a previous result's ``digest``). When the
+    #: tree is unchanged the reply is ``{unchanged: true, digest}`` with no projects.
+    known_digest: str | None = None
 
 
 class ProjectsTreeResult(Result):
-    projects: list[ProjectTreeNode]
+    projects: list[ProjectTreeNode] = Field(default_factory=list)
     active_id: str | None = None
     scoped_session_ids: list[str] = Field(default_factory=list)
+    digest: str | None = None
+    unchanged: bool = False
 
 
 method("projects.tree", params=ProjectsTreeParams, result=ProjectsTreeResult,

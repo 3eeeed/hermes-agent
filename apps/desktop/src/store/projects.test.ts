@@ -8,6 +8,7 @@ import { $currentCwd, $selectedStoredSessionId, $sessions, applyConfiguredDefaul
 import type { ProjectInfo } from '@/types/hermes'
 
 import {
+  _resetProjectTreeDigestForTests,
   $activeProjectId,
   $projects,
   $projectScope,
@@ -92,6 +93,9 @@ const getHermesConfig = vi.mocked(hermes.getHermesConfig)
 const notifications = await import('@/store/notifications')
 const notify = vi.mocked(notifications.notify)
 
+// The tree digest cache is module state; no test may inherit another's tree.
+beforeEach(() => _resetProjectTreeDigestForTests())
+
 function deferred<T>() {
   let resolve!: (value: T) => void
 
@@ -147,6 +151,7 @@ describe('projects RPC profile forwarding', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    _resetProjectTreeDigestForTests()
     $activeGatewayProfile.set('default')
     $activeProjectId.set(null)
     $projectTree.set([])
@@ -170,6 +175,32 @@ describe('projects RPC profile forwarding', () => {
       profile: 'coder',
       project_id: 'p_123'
     })
+  })
+
+  it('re-reads an unchanged tree by digest and keeps the tree it already holds', async () => {
+    const tree = [{ id: 'p1', label: 'One', path: null, repos: [], sessionCount: 1 } satisfies SidebarProjectTree]
+
+    const request = vi.fn(async (_method: string, params: Record<string, unknown>) =>
+      params.known_digest === 'd1'
+        ? { digest: 'd1', projects: [], unchanged: true }
+        : { active_id: 'p1', digest: 'd1', projects: tree, scoped_session_ids: ['s1'] }
+    )
+
+    const gateway = { connectionState: 'open', request }
+    activeGateway.mockReturnValue(gateway as never)
+    gatewayAtom.set(gateway as never)
+
+    await refreshProjectTree()
+    await refreshProjectTree()
+
+    expect(request).toHaveBeenNthCalledWith(1, 'projects.tree', { preview_limit: 3, profile: 'default' })
+    expect(request).toHaveBeenNthCalledWith(2, 'projects.tree', {
+      known_digest: 'd1',
+      preview_limit: 3,
+      profile: 'default'
+    })
+    expect($projectTree.get()).toEqual(tree)
+    expect($activeProjectId.get()).toBe('p1')
   })
 
   it('skips project reads in the all-profiles view rather than forwarding its sentinel', async () => {

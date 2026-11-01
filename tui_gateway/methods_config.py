@@ -93,8 +93,14 @@ def _(rid, params: dict) -> dict:
         tree, active_id = _stamped_project_tree(
             db, params, preview_limit=int(params.get("preview_limit") or 3), hydrate=False,
             session_limit=int(params.get("session_limit") or 2000), include_discovered=True)
-        return _ok(rid, {"projects": tree["projects"], "active_id": active_id,
-                         "scoped_session_ids": tree["scoped_session_ids"]})
+        body = {"projects": tree["projects"], "active_id": active_id,
+                "scoped_session_ids": tree["scoped_session_ids"]}
+        # The Desktop re-reads the whole tree on every sessions.changed; over a
+        # remote link an unchanged ~50 KB tree was re-sent many times a minute.
+        digest = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()[:32]
+        if params.get("known_digest") == digest:
+            return _ok(rid, {"projects": [], "unchanged": True, "digest": digest})
+        return _ok(rid, {**body, "digest": digest})
 
 
 @_projects_handler("projects.project_sessions")
