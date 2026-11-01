@@ -1,5 +1,31 @@
 import type { ModelOptionProvider, ModelOptionsResult } from '@hermes/shared'
-import { QueryClient, type QueryKey, replaceEqualDeep } from '@tanstack/react-query'
+import { focusManager, QueryClient, type QueryKey, replaceEqualDeep } from '@tanstack/react-query'
+
+// Interval refetches (`refetchInterval`) pause while the window is not focused
+// (`refetchIntervalInBackground` defaults to false), but React Query's default
+// signal is `visibilitychange` — and macOS keeps an unfocused or occluded
+// BrowserWindow `visible`, so every polled query kept hitting the backend all
+// day behind other apps (a real cost over a remote SSH link). Track window
+// focus too, matching visiblePoll/useViewedInterval.
+export function installWindowFocusSignal(target: Pick<Window, 'addEventListener' | 'removeEventListener'> = window) {
+  focusManager.setEventListener(handleFocus => {
+    const sync = () => handleFocus(document.visibilityState === 'visible' && document.hasFocus())
+
+    target.addEventListener('focus', sync)
+    target.addEventListener('blur', sync)
+    document.addEventListener('visibilitychange', sync)
+
+    return () => {
+      target.removeEventListener('focus', sync)
+      target.removeEventListener('blur', sync)
+      document.removeEventListener('visibilitychange', sync)
+    }
+  })
+}
+
+if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  installWindowFocusSignal()
+}
 
 // Shared React Query client. Lives in its own module (not main.tsx) so non-React
 // code — e.g. the profile store on a gateway swap — can invalidate cached,

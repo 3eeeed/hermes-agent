@@ -1048,6 +1048,53 @@ function visiblePoll(intervalMs: number, tick: () => void): () => void {
   }
 }
 
+export interface ViewedGate {
+  /** Run now when the window is being viewed, else once when it next is. */
+  request: () => void
+  dispose: () => void
+}
+
+/** Hold change-driven REST refreshes while nobody is looking at the window.
+ *  Every state.db write (a Discord turn, a cron run) broadcasts
+ *  sessions.changed, and each one re-pulled the session lists, sidebar, open
+ *  transcripts and project tree — over a remote SSH link that kept an
+ *  untouched, unfocused window pulling data all day. Requests while unviewed
+ *  collapse into ONE catch-up run on return; live turn events still arrive on
+ *  the socket, so attention badges and notifications are unaffected. */
+export function createViewedGate(
+  run: () => void,
+  isViewed: () => boolean = () =>
+    windowIsActivelyViewed({ focused: document.hasFocus(), visibilityState: document.visibilityState })
+): ViewedGate {
+  let pending = false
+
+  const flush = () => {
+    if (pending && isViewed()) {
+      pending = false
+      run()
+    }
+  }
+
+  window.addEventListener('focus', flush)
+  document.addEventListener('visibilitychange', flush)
+
+  return {
+    request: () => {
+      if (isViewed()) {
+        pending = false
+        run()
+      } else {
+        pending = true
+      }
+    },
+    dispose: () => {
+      pending = false
+      window.removeEventListener('focus', flush)
+      document.removeEventListener('visibilitychange', flush)
+    }
+  }
+}
+
 /**
  * Keeps app data live while the gateway is open: an on-connect reseed (model /
  * profile / sessions + relative-cwd resolution), the cron / messaging /
@@ -1483,7 +1530,7 @@ export function useBackgroundSync({
       }
     }
 
-    const unsubscribe = $sessionsChangeTick.listen(() => {
+    const scheduleRun = () => {
       const since = Date.now() - lastRunAt
 
       if (since >= SESSIONS_LIST_TICK_GAP_MS) {
@@ -1496,10 +1543,15 @@ export function useBackgroundSync({
           runWhenKeyboardQuiet()
         }, SESSIONS_LIST_TICK_GAP_MS - since)
       }
-    })
+    }
+
+    const viewedGate = createViewedGate(scheduleRun)
+
+    const unsubscribe = $sessionsChangeTick.listen(() => viewedGate.request())
 
     return () => {
       unsubscribe()
+      viewedGate.dispose()
 
       if (timer !== null) {
         window.clearTimeout(timer)
@@ -1539,14 +1591,21 @@ export function useBackgroundSync({
       return
     }
 
+    const viewedGate = createViewedGate(() => void refreshCronJobs())
+
     if (cronChangeTick > 0) {
-      void refreshCronJobs()
+      viewedGate.request()
     }
 
-    return visiblePoll(
+    const disposePoll = visiblePoll(
       changeEventsAvailable ? CRON_BACKSTOP_INTERVAL_MS : CRON_POLL_INTERVAL_MS,
       () => void refreshCronJobs()
     )
+
+    return () => {
+      viewedGate.dispose()
+      disposePoll()
+    }
   }, [changeEventsAvailable, cronChangeTick, gatewayState, refreshCronJobs])
 
   // projects.changed (projects.db moved: a CLI `hermes projects create`, another
