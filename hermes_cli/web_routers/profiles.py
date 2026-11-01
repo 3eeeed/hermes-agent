@@ -384,6 +384,17 @@ def _profiles_failed(errors: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
     }
 
 
+# Row fields no sidebar consumer reads (Desktop, dashboard). The sidebar is re-polled on
+# every state.db write, so per-row bulk is paid many times a minute over remote links;
+# ``tool_names`` alone was ~20% of a 130 KB payload. Detail reads stay complete.
+_SIDEBAR_UNUSED_FIELDS = (
+    "tool_names", "origin_json", "billing_base_url", "pricing_version",
+    "last_activity_provenance", "compression_failure_cooldown_until",
+    "compression_failure_error", "compression_fallback_streak",
+    "compression_ineffective_count", "compression_recovery_deadline",
+)
+
+
 def _sidebar_singleflight_cache(func):
     """Coalesce concurrent sidebar scans and briefly reuse their response.
 
@@ -607,6 +618,9 @@ def get_profiles_sessions_sidebar(
         rows[key].sort(key=_recency, reverse=True)
         win = _pinned_window(rows[key], 0, cap[key])
         _strip_session_list_rows(win)
+        for row in win:
+            for field in _SIDEBAR_UNUSED_FIELDS:
+                row.pop(field, None)
         return win
 
     storage = _corrupt_profile_stores(scanned)

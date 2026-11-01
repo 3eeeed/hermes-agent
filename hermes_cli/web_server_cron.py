@@ -124,6 +124,24 @@ def _cron_profile_home(profile: Optional[str]) -> tuple[str, Path]:
     return canon, profiles_mod.get_profile_dir(canon)
 
 
+def _quantize_heartbeat_age(age: Optional[float]) -> Optional[float]:
+    """Heartbeat age as a value that only moves when it matters.
+
+    The raw age changes every second, so every Desktop cron poll differed and
+    could never revalidate to a 304. Consumers only care once the ticker is stale
+    (the dashboard flags > 200s), so a healthy ticker reports 0 and a stale one
+    whole minutes.
+    """
+    if age is None:
+        return None
+    if age < _HEARTBEAT_FRESH_S:
+        return 0.0
+    return float(int(age // 60) * 60)
+
+
+_HEARTBEAT_FRESH_S = 120.0
+
+
 def _annotate_cron_job(
     job: dict[str, Any], profile: str, home: Path, heartbeat_age: Optional[float] = None,
 ) -> dict[str, Any]:
@@ -136,7 +154,7 @@ def _annotate_cron_job(
         # Seconds since this profile's ticker last iterated (None = never/unknown): a
         # `next_run_at` parked in the past is only explained by a scheduler that stopped
         # ticking, so the dashboard can date it (#114309).
-        "scheduler_heartbeat_age_s": heartbeat_age}
+        "scheduler_heartbeat_age_s": _quantize_heartbeat_age(heartbeat_age)}
 
 
 @contextlib.contextmanager

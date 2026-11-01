@@ -1561,3 +1561,27 @@ class TestCronRunHistoryFallback:
         assert older["id"] == f"cron_output:{job_id}:2026-09-25_10-00-00"
         assert older["title"].startswith("COMPLETED · successful older run")
         assert older["started_at"] == _at("2026-09-25_10-00-00").timestamp()
+
+
+def test_healthy_ticker_heartbeat_is_stable_across_polls_so_cron_polls_revalidate(isolated_profiles):
+    """Desktop polls the cron list every few seconds; a heartbeat age that moved every second
+    made every body differ, so ETag revalidation could never answer 304. A healthy ticker must
+    report a stable value while a stale one stays dateable."""
+    import time
+
+    home = isolated_profiles["worker_alpha"]
+    with _web_server_cron._cron_store_scope(home) as cron_jobs:
+        cron_jobs.create_job(prompt="hourly", schedule="every 1h")
+    beat = home / "cron" / "ticker_heartbeat"
+
+    def age():
+        return next(j for j in _rt_cron._list_cron_jobs_sync("all") if j["profile"] == "worker_alpha")[
+            "scheduler_heartbeat_age_s"]
+
+    beat.write_text(str(time.time() - 3))
+    first = age()
+    beat.write_text(str(time.time() - 40))
+    assert age() == first
+
+    beat.write_text(str(time.time() - 600))
+    assert age() >= 540
