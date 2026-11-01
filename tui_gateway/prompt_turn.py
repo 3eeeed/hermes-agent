@@ -739,6 +739,39 @@ def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images
     return prompt, _prepend_note(run_message, _hud_surface_note(session)), cols, streamer
 
 
+def _apply_session_credential_selection(session: dict, agent) -> None:
+    """Apply the desktop's persisted account before dispatch, including cached agents."""
+    from agent.credential_pool import POOL_PIN_KEYS
+
+    pool = getattr(agent, "credential_pool", None) or getattr(agent, "_credential_pool", None)
+    provider = getattr(agent, "provider", None) or getattr(pool, "provider", "")
+    pin_key = POOL_PIN_KEYS.get(provider)
+    if not pin_key:
+        return
+    session_key = _session_lookup_key(session)
+    with _session_db(session) as db:
+        if db is None:
+            raise RuntimeError("Cannot verify the selected account: session database unavailable.")
+        selected_id = db.get_session_model_config_value(session_key, pin_key)
+    if selected_id:
+        entry = next((e for e in pool.entries() if e.id == selected_id), None) if pool else None
+        if entry is None:
+            raise RuntimeError("The selected account is unavailable. Select an account again before sending.")
+        if not agent._swap_credential(entry):
+            raise RuntimeError("The selected account could not be activated. No request was sent.")
+        logger.info("Session credential activated: session=%s provider=%s credential_id=%s",
+                    session_key, provider, entry.id)
+
+    def persist_rotation(entry):
+        # Resolve the live key again: compression can move the conversation to a descendant.
+        with _session_db(session) as db:
+            if db is None:
+                raise RuntimeError("Cannot persist the replacement account: session database unavailable.")
+            db.patch_session_model_config(_session_lookup_key(session), {pin_key: entry.id})
+
+    agent.credential_rotation_callback = persist_rotation
+
+
 def _invoke_agent(
     sid: str, session: dict, st: _TurnRun, prompt: Any, run_message: Any, streamer,
     images: list[str], display_kind: str | None, display_metadata: dict | None,
@@ -746,6 +779,7 @@ def _invoke_agent(
     """Wire the streaming callbacks and run the conversation into ``st.result``.
     ``text`` is the turn's raw submit, matched against the row staged by prompt.submit."""
     agent = st.agent
+    _apply_session_credential_selection(session, agent)
     st.compression_count = getattr(getattr(agent, "context_compressor", None), "compression_count", None)
     # Bot Chat mirrors gateway.stream_consumer: deltas are withheld while the reply could still
     # be a bare silence marker ("NO"->"NO_REPLY") or its last line a closing one
