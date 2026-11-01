@@ -461,6 +461,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         runner = self._runner
         agent._notification_config = ctx.user_config
         agent._notification_platform = ctx.source.platform
+        from gateway.run_turn_pool_pin import apply_session_pool_pin
+        apply_session_pool_pin(agent, runner, ctx.session_id)
         # ALWAYS attached (never gated to None): its body gates each event class, and subagent-
         # failure notices must fire even with tool_progress/thinking off.
         agent.tool_progress_callback = ctx.progress_callback
