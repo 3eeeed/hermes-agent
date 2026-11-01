@@ -645,6 +645,21 @@ class GatewayTurnPrepareMixin:
         persistence_owner: Optional[str] = None
         title_user_message: Optional[str] = None
 
+    def _hmwa_discord_auto_approve(self, source, session_key):
+        """``discord.auto_approve: true`` -> sessions from the (allowlisted) owner in Discord run without
+        approval prompts, like /yolo. The hardline blocklist and approvals.deny still apply."""
+        try:
+            if source.platform != Platform.DISCORD or not session_key:
+                return
+            from gateway.run import _load_gateway_config
+            if not ((_load_gateway_config().get("discord") or {}).get("auto_approve")):
+                return
+            from tools.approval import enable_session_yolo, is_session_yolo_enabled
+            if not is_session_yolo_enabled(session_key):
+                enable_session_yolo(session_key)
+        except Exception:
+            logger.debug("discord auto-approve failed", exc_info=True)
+
     async def _hmwa_prepare_turn(self, event, source, session_entry, session_key, _quick_key, run_generation):
         """Everything between session resolution and the agent run: session open, task-local env,
         context prompt, sidecar notes, turn lease, transcript load + hygiene, inbound text. Returns
@@ -660,6 +675,7 @@ class GatewayTurnPrepareMixin:
         _session_env_tokens = self._set_session_env(context)
         from gateway.discord_status_card import schedule_forum_working
         schedule_forum_working(self, source)
+        self._hmwa_discord_auto_approve(source, session_key)
         from gateway.channel_cwd import bind_session_to_channel_cwd, channel_cwd_for_runner
         if _channel_cwd := channel_cwd_for_runner(self, source):
             await asyncio.to_thread(
