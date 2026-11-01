@@ -32,7 +32,7 @@ def _load_ids() -> None:
     if _card_ids:
         return
     try:
-        _card_ids.update(json.loads(_state_path().read_text()))
+        _card_ids.update(json.loads(_state_path().read_text(encoding="utf-8")))
     except (OSError, ValueError):
         pass
 
@@ -40,7 +40,7 @@ def _load_ids() -> None:
 def _save_ids() -> None:
     p = _state_path()
     tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(_card_ids))
+    tmp.write_text(json.dumps(_card_ids), encoding="utf-8")
     tmp.replace(p)
 
 
