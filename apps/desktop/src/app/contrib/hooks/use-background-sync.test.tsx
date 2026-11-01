@@ -140,6 +140,7 @@ describe('useBackgroundSync profile-scoped session refresh', () => {
 
     expect(loadArchivedSessions).toHaveBeenCalledTimes(1)
   })
+
   it('holds an external session change for an unviewed window and catches up once on focus', async () => {
     $changeEventsAvailable.set(true)
     $sidebarShowArchived.set(true)
