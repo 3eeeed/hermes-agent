@@ -53,11 +53,15 @@ describe('useBackgroundSync profile-scoped session refresh', () => {
     $sessionsChangeTick.set(0)
     $sidebarShowArchived.set(false)
     vi.mocked(loadArchivedSessions).mockReset()
+    // Change-driven refreshes only run for a window the user is viewing; jsdom's
+    // document.hasFocus() is not reliably true, so pin it.
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true)
   })
 
   afterEach(() => {
     cleanup()
     vi.useRealTimers()
+    vi.restoreAllMocks()
   })
 
   it('coalesces change ticks while the live status request is pending', async () => {
@@ -119,6 +123,25 @@ describe('useBackgroundSync profile-scoped session refresh', () => {
 
     await act(async () => {
       $sessionsChangeTick.set(1)
+    })
+
+    expect(loadArchivedSessions).toHaveBeenCalledTimes(1)
+  })
+  it('holds an external session change for an unviewed window and catches up once on focus', async () => {
+    $changeEventsAvailable.set(true)
+    $sidebarShowArchived.set(true)
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false)
+    render('default', 'local', async () => undefined)
+
+    await act(async () => {
+      $sessionsChangeTick.set(1)
+      $sessionsChangeTick.set(2)
+    })
+    expect(loadArchivedSessions).not.toHaveBeenCalled()
+
+    hasFocus.mockReturnValue(true)
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'))
     })
 
     expect(loadArchivedSessions).toHaveBeenCalledTimes(1)
