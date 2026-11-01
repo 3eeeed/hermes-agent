@@ -31876,6 +31876,18 @@
             ],
             "default": null,
             "title": "Known Digest"
+          },
+          "accept_delta": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Accept Delta"
           }
         },
         "title": "ProjectsTreeParams",
@@ -31925,6 +31937,53 @@
           "unchanged": {
             "default": false,
             "title": "Unchanged",
+            "type": "boolean"
+          },
+          "order": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Order"
+          },
+          "base_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Base Digest"
+          },
+          "nodes": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ProjectTreeNode"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Nodes"
+          },
+          "scoped_unchanged": {
+            "default": false,
+            "title": "Scoped Unchanged",
             "type": "boolean"
           }
         },

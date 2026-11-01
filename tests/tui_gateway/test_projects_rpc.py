@@ -781,3 +781,31 @@ def test_projects_tree_answers_unchanged_for_the_digest_the_client_holds(monkeyp
     assert same == {"projects": [], "unchanged": True, "digest": first["digest"]}
     assert not moved.get("unchanged") and moved["digest"] != first["digest"]
     assert set(moved["scoped_session_ids"]) == {"digest-one", "digest-two"}
+
+
+def test_projects_tree_delta_ships_only_the_project_nodes_the_client_lacks(monkeypatch, tmp_path):
+    """While a chat works, one project's counts move on every re-read. A client holding the
+    previous tree gets the new order plus only the changed node, and rebuilding from it yields
+    exactly the full tree."""
+    home = _profile_dir(tmp_path, "launch")
+    repos = [tmp_path / "repos" / name for name in ("alpha", "beta")]
+    for repo in repos:
+        repo.mkdir(parents=True)
+    _bind_profiles(monkeypatch, tmp_path, {"default": home})
+    _create_project(home, "Alpha", repos[0], use=True)
+    _create_project(home, "Beta", repos[1])
+    _create_session(home, "alpha-one", repos[0])
+    _create_session(home, "beta-one", repos[1])
+
+    with _serving_launch_profile(home):
+        first = _call("projects.tree")
+        _create_session(home, "alpha-two", repos[0])
+        delta = _call("projects.tree", {"known_digest": first["digest"], "accept_delta": True})
+        full = _call("projects.tree")
+
+    held = dict(zip(first["order"], first["projects"]))
+    rebuilt = [delta["nodes"].get(h) or held[h] for h in delta["order"]]
+    assert delta["base_digest"] == first["digest"] and delta["digest"] == full["digest"]
+    assert rebuilt == full["projects"]
+    assert 0 < len(delta["nodes"]) < len(full["projects"])
+    assert sorted(delta.get("scoped_session_ids") or []) == sorted(full["scoped_session_ids"])
