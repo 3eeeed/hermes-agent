@@ -2558,11 +2558,14 @@ export interface ProjectsTreeParams {
   profile?: string | null
   preview_limit?: number | null
   session_limit?: number | null
+  known_digest?: string | null
 }
 export interface ProjectsTreeResult {
-  projects: ProjectTreeNode[]
+  projects?: ProjectTreeNode[]
   active_id?: string | null
   scoped_session_ids?: string[]
+  digest?: string | null
+  unchanged?: boolean
 }
 /** ``project_tree._project_node`` — explicit, auto (git root) or the synthetic Home bucket. */
 export interface ProjectTreeNode {

@@ -452,6 +452,49 @@ interface ProjectTreePayload {
   projects: SidebarProjectTree[]
   active_id: null | string
   scoped_session_ids: string[]
+  digest?: null | string
+  unchanged?: boolean
+}
+
+// The last full tree this window received, so a refresh can send its digest
+// and the backend answers "unchanged" instead of re-sending the whole tree
+// (re-read on every sessions.changed). Bound to the exact gateway, profile and
+// preview window it was fetched for; anything else asks for a full tree.
+let lastProjectTree: {
+  gateway: unknown
+  key: string
+  payload: ProjectTreePayload & { digest: string }
+} | null = null
+
+export function _resetProjectTreeDigestForTests(): void {
+  lastProjectTree = null
+}
+
+async function requestProjectTree(context: ActiveProjectsContext): Promise<ProjectTreePayload> {
+  const previewLimit = projectTreePreviewLimit()
+  const key = `${context.profile ?? ''}\u0000${previewLimit}`
+  const known = lastProjectTree?.gateway === context.gateway && lastProjectTree.key === key ? lastProjectTree : null
+
+  const res = await gatewayRequestOn<ProjectTreePayload>(
+    context.gateway,
+    'projects.tree',
+    projectParams({ preview_limit: previewLimit, ...(known ? { known_digest: known.payload.digest } : {}) }, context.profile)
+  )
+
+  if (res.unchanged) {
+    if (known && res.digest === known.payload.digest) {
+      return known.payload
+    }
+
+    // Our copy was replaced while the request was in flight: ask again in full.
+    lastProjectTree = null
+
+    return requestProjectTree(context)
+  }
+
+  lastProjectTree = res.digest ? { gateway: context.gateway, key, payload: { ...res, digest: res.digest } } : null
+
+  return res
 }
 
 // Expanded previews need the complete existing tree window before the renderer
@@ -533,11 +576,7 @@ async function refreshProjectTreeOn(context: ActiveProjectsContext): Promise<voi
     let res: ProjectTreePayload
 
     try {
-      res = await gatewayRequestOn<ProjectTreePayload>(
-        gateway,
-        'projects.tree',
-        projectParams({ preview_limit: projectTreePreviewLimit() }, profile)
-      )
+      res = await requestProjectTree(context)
     } catch (error) {
       // A remote source switch can leave the first read RPC on a newly-opened
       // socket without a response even though the gateway remains healthy.
@@ -547,11 +586,7 @@ async function refreshProjectTreeOn(context: ActiveProjectsContext): Promise<voi
         throw error
       }
 
-      res = await gatewayRequestOn<ProjectTreePayload>(
-        gateway,
-        'projects.tree',
-        projectParams({ preview_limit: projectTreePreviewLimit() }, profile)
-      )
+      res = await requestProjectTree(context)
     }
 
     if (generation !== projectTreeRefreshGeneration || !stillOnProjectsContext(context)) {
