@@ -205,10 +205,14 @@ async def set_forum_state(adapter: Any, thread_id: str, state: str) -> None:
     try:
         thread = client.get_channel(int(thread_id)) or await client.fetch_channel(int(thread_id))
         forum = getattr(thread, "parent", None)
+        if forum is None and getattr(thread, "parent_id", None):
+            forum = client.get_channel(thread.parent_id) or await client.fetch_channel(thread.parent_id)
         tags = {t.name: t for t in getattr(forum, "available_tags", []) or []}
         if state not in tags:
             return
-        current = list(getattr(thread, "applied_tags", []) or [])
+        by_id = {t.id: t for t in tags.values()}
+        raw = await client.http.get_channel(int(thread_id))  # applied_tags straight from Discord
+        current = [by_id[int(i)] for i in raw.get("applied_tags", []) if int(i) in by_id]
         if any(t.name == "خلص" for t in current):
             return
         keep = [t for t in current if t.name not in _STATE_TAGS]
