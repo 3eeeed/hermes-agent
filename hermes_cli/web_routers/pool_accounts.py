@@ -81,11 +81,17 @@ async def list_credential_pool_usage(provider: str, profile: Optional[str] = Non
     the usage response is serialized. One expired account must not hide the others.
     """
     provider = _validated_pool_provider(provider)
-
-    def _run() -> list[dict[str, Any]]:
-        return [_usage_entry(provider, entry) for entry in _pool_entries(provider)]
-
-    return {"provider": provider, "entries": await config_scoped_to_thread(profile, _run)}
+    entries = await config_scoped_to_thread(profile, lambda: _pool_entries(provider))
+    # One account's slow usage endpoint must not serialize the others behind it.
+    usage = await asyncio.gather(*(
+        config_scoped_to_thread(profile, lambda entry=entry: _usage_entry(provider, entry)) for entry in entries
+    ))
+    # Reported even when the pool is empty. Anthropic legitimately starts at
+    # zero: Hermes borrows the ambient Claude Code credential, and the pool
+    # refuses to adopt it until the user explicitly configures the provider
+    # (PR #4210). The desktop menu needs to render its add button in that
+    # state, otherwise the first account can never be added from the UI.
+    return {"provider": provider, "entries": list(usage), "can_add_accounts": True}
 
 
 @router.put("/api/credentials/pool/{provider}/session-selection")
