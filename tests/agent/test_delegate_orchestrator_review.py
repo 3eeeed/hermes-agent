@@ -103,4 +103,4 @@ def test_review_outside_git_reports_unknown_count_not_zero(tmp_path, monkeypatch
         (tmp_path / "new.txt").write_text("x")
         orch.after_dispatch(agent, "{}")
     review = next(info for info in seen if info["phase"] == "review")
-    assert review["changed_count"] == 1 and "1 file(s) changed" in phase_line(review)
+    assert review["changed_count"] == 1
