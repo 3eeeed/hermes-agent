@@ -41,7 +41,24 @@ def _anthropic_token_lapsed(provider: str, entry: Any) -> bool:
     )
 
 
-def _usage_entry(provider: str, entry: Any) -> dict[str, Any]:
+def _header_usage_fallback(provider: str, entry: Any, snapshot: Any, probe: bool) -> Any:
+    """Claude long-lived setup tokens are refused by /api/oauth/usage; read quota from response headers.
+
+    Only an explicit ``probe`` (the Desktop opening the account menu) spends a 1-token request;
+    background polls reuse what chat replies or the last probe already recorded.
+    """
+    if provider != "anthropic" or (snapshot is not None and snapshot.available):
+        return snapshot
+    from agent.account_usage import anthropic_header_usage_snapshot
+    from agent.anthropic_credentials import _is_oauth_token
+
+    token = str(entry.runtime_api_key or "").strip()
+    if not token or not _is_oauth_token(token):
+        return snapshot
+    return anthropic_header_usage_snapshot(token, probe=probe) or snapshot
+
+
+def _usage_entry(provider: str, entry: Any, probe: bool = False) -> dict[str, Any]:
     """One account's quota, never its credential material. Fails open per account."""
     from agent.account_usage import fetch_account_usage
     from hermes_cli.web_routers.ops import pool_entry_account_email
@@ -64,6 +81,7 @@ def _usage_entry(provider: str, entry: Any) -> dict[str, Any]:
             if refreshed is not None:
                 entry = refreshed
                 snapshot = _fetch(entry)
+        snapshot = _header_usage_fallback(provider, entry, snapshot, probe)
     except Exception:
         _log.debug("%s usage lookup failed for pool entry %s", provider, entry.id, exc_info=True)
         snapshot = None
@@ -101,18 +119,20 @@ def _pool_entries(provider: str) -> list[Any]:
 
 
 @router.get("/api/credentials/pool/{provider}/usage")
-async def list_credential_pool_usage(provider: str, profile: Optional[str] = None):
+async def list_credential_pool_usage(provider: str, profile: Optional[str] = None, probe: bool = False):
     """Per-account quota for a pool-backed provider (Codex, Claude).
 
     The normal pool endpoint intentionally exposes only operational metadata; the
     account menu needs the limits, so each credential is resolved server-side and only
     the usage response is serialized. One expired account must not hide the others.
+    ``probe=true`` (sent when the account menu opens) lets accounts the usage route
+    refuses refresh their quota with a 1-token request.
     """
     provider = _validated_pool_provider(provider)
     entries = await config_scoped_to_thread(profile, lambda: _pool_entries(provider))
     # One account's slow usage endpoint must not serialize the others behind it.
     usage = await asyncio.gather(*(
-        config_scoped_to_thread(profile, lambda entry=entry: _usage_entry(provider, entry)) for entry in entries
+        config_scoped_to_thread(profile, lambda entry=entry: _usage_entry(provider, entry, probe)) for entry in entries
     ))
     # Reported even when the pool is empty. Anthropic legitimately starts at
     # zero: Hermes borrows the ambient Claude Code credential, and the pool

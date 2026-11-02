@@ -28,6 +28,7 @@ function controllerWith(
     renameCandidate: null,
     renameError: null,
     renaming: false,
+    refreshUsageForMenu: () => {},
     select: () => {},
     setDeleteCandidate: () => {},
     setDeleteError: () => {},
@@ -41,6 +42,28 @@ function controllerWith(
     ...overrides
   }
 }
+
+describe('PooledAccountsMenu quota refresh', () => {
+  it('asks for fresh quota exactly once when the menu opens', () => {
+    const refreshUsageForMenu = vi.fn()
+
+    const view = render(
+      <PooledAccountsMenu
+        controller={controllerWith(null, false, { refreshUsageForMenu })}
+        focusedStoredSessionId={null}
+      />
+    )
+
+    view.rerender(
+      <PooledAccountsMenu
+        controller={controllerWith(null, false, { refreshUsageForMenu })}
+        focusedStoredSessionId={null}
+      />
+    )
+
+    expect(refreshUsageForMenu).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('PooledAccountsMenu account row status', () => {
   it('shows the pending placeholder only while quota has not arrived', () => {

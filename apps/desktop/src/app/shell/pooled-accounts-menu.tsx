@@ -1,3 +1,5 @@
+import { useEffect } from 'react'
+
 import type { PooledAccountsController } from '@/app/shell/hooks/use-pooled-accounts'
 import { CheckCircle2, Pencil, Plus, X } from '@/lib/icons'
 import { cn } from '@/lib/utils'
@@ -42,6 +44,13 @@ export function PooledAccountsMenu({
     usageById,
     usageLoading
   } = controller
+
+  const { refreshUsageForMenu } = controller
+
+  // The menu body mounts only while open: opening it is the one moment worth a
+  // fresh quota read (and, for header-only Claude accounts, a 1-token probe).
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- once per open, not per controller render
+  useEffect(() => refreshUsageForMenu(), [])
 
   const activeLabel = (accounts.find(entry => entry.id === activeCredentialId)?.label ?? '').trim()
 

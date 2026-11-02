@@ -1,4 +1,4 @@
-import { useQuery, type UseQueryResult } from '@tanstack/react-query'
+import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 
 import { cancelOAuthSession, pollOAuthSession, startOAuthLogin, submitOAuthCode } from '@/api/config'
@@ -39,6 +39,8 @@ export interface PooledAccountsController {
   renameCandidate: { id: string; label: string } | null
   renameError: null | string
   renaming: boolean
+  /** Fresh quota on menu open, letting header-only Claude accounts spend one probe request. */
+  refreshUsageForMenu: () => void
   select: (credentialId: string) => void
   setDeleteCandidate: (candidate: { id: string; label: string } | null) => void
   setDeleteError: (message: null | string) => void
@@ -112,6 +114,22 @@ export function usePooledAccounts(options: {
   })
 
   const canAddAccounts = accountUsage.data?.can_add_accounts ?? false
+
+  const queryClient = useQueryClient()
+
+  const refreshUsageForMenu = () => {
+    if (!enabled) {
+      return
+    }
+
+    void queryClient
+      .fetchQuery({
+        queryFn: () => getCredentialPoolUsage(provider, activeGatewayProfile || undefined, { probe: true }),
+        queryKey: ['credential-pool-usage', provider, activeGatewayProfile],
+        staleTime: 0
+      })
+      .catch(() => undefined)
+  }
 
   const usageById = useMemo(
     () => new Map((accountUsage.data?.entries ?? []).map(entry => [entry.id, entry])),
@@ -337,6 +355,7 @@ export function usePooledAccounts(options: {
     renameCandidate,
     renameError,
     renaming,
+    refreshUsageForMenu,
     select,
     setDeleteCandidate,
     setDeleteError,

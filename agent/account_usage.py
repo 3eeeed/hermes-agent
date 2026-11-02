@@ -871,6 +871,24 @@ def _anthropic_scoped_windows(payload: dict, taken: set[str]) -> list[AccountUsa
     return windows
 
 
+def anthropic_header_usage_snapshot(token: str, *, probe: bool) -> Optional[AccountUsageSnapshot]:
+    """Quota from cached Messages response headers; with *probe*, refresh it by a 1-token request first."""
+    from agent import anthropic_header_usage as header_usage
+
+    if probe and header_usage.probe_due(token):
+        try:
+            header_usage.probe(token)
+        except Exception:
+            logger.debug("anthropic header usage probe failed", exc_info=True)
+    entry = header_usage.cached(token)
+    if entry is None:
+        return None
+    return AccountUsageSnapshot(
+        provider="anthropic", source="response_headers", windows=tuple(header_usage.to_windows(entry)),
+        fetched_at=datetime.fromtimestamp(float(entry["captured_at"]), tz=UTC),
+    )
+
+
 def _fetch_anthropic_account_usage(
     base_url: Optional[str] = None, api_key: Optional[str] = None
 ) -> Optional[AccountUsageSnapshot]:

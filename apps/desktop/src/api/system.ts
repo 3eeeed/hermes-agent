@@ -176,11 +176,14 @@ export type PooledAccountProvider = 'anthropic' | 'openai-codex'
  * The response contains display metadata only, never account credentials. */
 export function getCredentialPoolUsage(
   provider: PooledAccountProvider,
-  profile?: null | string
+  profile?: null | string,
+  options: { probe?: boolean } = {}
 ): Promise<CredentialPoolUsageResponse> {
+  // `probe` lets accounts the usage route refuses (Claude setup tokens) refresh
+  // their quota with a 1-token request; only sent when the account menu opens.
   return hermesApi<CredentialPoolUsageResponse>({
     ...profileScoped(profile),
-    path: `/api/credentials/pool/${provider}/usage`
+    path: `/api/credentials/pool/${provider}/usage${options.probe ? '?probe=true' : ''}`
   })
 }
 

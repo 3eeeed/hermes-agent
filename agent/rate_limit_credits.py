@@ -76,6 +76,14 @@ class RateLimitCreditsMixin:
         aggregated ``Message`` drops them). Fail-open."""
         self._capture_rate_limits(http_response)
         self._capture_credits(http_response)
+        if getattr(self, "_is_anthropic_oauth", False):
+            # Subscription quota rides on every reply; caching it lets the account
+            # menu show bars for tokens the /api/oauth/usage route refuses.
+            try:
+                from agent.anthropic_header_usage import record
+                record(getattr(self, "_anthropic_api_key", "") or "", _response_headers(http_response))
+            except Exception:
+                logger.debug("anthropic header usage capture failed", exc_info=True)
 
     def _capture_credits(self, http_response: Any, *, refused: bool = False) -> None:
         """Parse x-nous-credits-* headers, cache CreditsState, fire threshold notices.

@@ -292,6 +292,47 @@ class TestCredentialPoolEndpoints:
         assert refreshed_ids == ["claude-1"], "must refresh exactly the failing entry, by stable id"
         assert "sk-ant-oat" not in response.text and "rt-secret" not in response.text
 
+    def test_anthropic_setup_token_usage_probes_only_when_the_menu_asks(self, monkeypatch):
+        """A setup token the usage route refuses reads quota from response headers;
+        only ``probe=true`` (menu open) may spend a request, background polls never do."""
+        from agent import account_usage, credential_pool
+        from agent import anthropic_header_usage as header_usage
+        from agent.credential_pool import PooledCredential
+
+        entry = PooledCredential(
+            provider="anthropic", id="hadota", label="Hadota", auth_type="oauth", priority=1,
+            source="manual", access_token="sk-ant-oat01-setup", refresh_token=None,
+        )
+
+        class Pool:
+            def entries(self):
+                return [entry]
+
+        probes = []
+
+        def fake_probe(token, **_kw):
+            probes.append(token)
+            header_usage.record(token, {
+                "anthropic-ratelimit-unified-5h-utilization": "0.01",
+                "anthropic-ratelimit-unified-7d-utilization": "0.24",
+                "anthropic-ratelimit-unified-7d_oi-utilization": "0.0",
+            })
+
+        monkeypatch.setattr(credential_pool, "load_pool", lambda provider: Pool())
+        monkeypatch.setattr(account_usage, "_get_json", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("429")))
+        monkeypatch.setattr(header_usage, "probe", fake_probe)
+
+        background = self.client.get("/api/credentials/pool/anthropic/usage").json()["entries"][0]
+        assert background["available"] is False and probes == []
+
+        opened = self.client.get("/api/credentials/pool/anthropic/usage?probe=true")
+        windows = {w["label"]: w["used_percent"] for w in opened.json()["entries"][0]["windows"]}
+        assert windows == {"Current session": 1.0, "Current week": 24.0, "Fable weekly": 0.0}
+        assert len(probes) == 1 and "sk-ant-oat01-setup" not in opened.text
+
+        polled = self.client.get("/api/credentials/pool/anthropic/usage").json()["entries"][0]
+        assert polled["available"] is True and len(probes) == 1, "polls reuse the cached snapshot"
+
     def test_usage_reports_whether_accounts_can_be_added_when_the_pool_is_empty(self, monkeypatch):
         """An empty pool must still say that accounts CAN be added.
 
