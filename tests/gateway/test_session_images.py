@@ -118,8 +118,17 @@ def test_authenticated_daemon_upload_retains_exact_admitted_bytes(tmp_path):
             assert list((home / 'cache/images').iterdir()) == [path]
             with closing(sqlite3.connect(f'file:{home / "state.db"}?mode=ro', uri=True)) as db:
                 assert db.execute('SELECT count(*) FROM session_admissions').fetchone()[0] == 0
+            attachments = [{'path': str(path), 'mime': image['mime']}]
+            # An unknown key is still the closed contract's refusal.
+            refused = await rpc(ws, 'prompt.submit', session_id=sid, input_id='image-input',
+                                text='Retain upload', attachments=attachments, not_a_field=True)
+            assert refused['error']['message'] == 'invalid_params', refused
+            # The Desktop's real image send: it stamps the per-attempt send-ledger evidence
+            # (staged paths, client send id) on every attachment submit. Those must be accepted
+            # as transport-only, never refuse the turn (images failed with invalid_params).
             submitted = await rpc(ws, 'prompt.submit', session_id=sid, input_id='image-input',
-                                  text='Retain upload', attachments=[{'path': str(path), 'mime': image['mime']}])
+                                  text='Retain upload', attachments=attachments,
+                                  staged_attachment_paths=[str(path)], client_send_id='send-1')
             assert 'result' in submitted, submitted
             with closing(sqlite3.connect(f'file:{home / "state.db"}?mode=ro', uri=True)) as db:
                 payload = json.loads(db.execute('SELECT payload_json FROM session_admissions WHERE request_id=?', ('image-input',)).fetchone()[0])

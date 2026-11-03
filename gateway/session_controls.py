@@ -99,6 +99,14 @@ _PROFILE_IMPLICIT = frozenset({'session.create', 'session.list', 'session.info',
                                'session.interrupt', 'session.events.since', 'session.mutate', 'session.stats',
                                'approval.respond', 'clarify.respond'})
 
+# Per-attempt transport evidence the Desktop stamps on every ``prompt.submit`` for the legacy
+# runtime's send ledger (``tui_gateway/methods_prompt_send_ledger.py``): ``staged_attachment_paths``
+# names the ``image.attach`` copies this attempt staged, ``client_send_id`` keys its lost-ACK
+# replay. Neither is part of the message, and the canonical owner keys retries on
+# ``submission_id`` and admits images from ``attachments`` itself, so they are dropped here instead
+# of refusing the whole turn as an unknown key (every image send failed with ``invalid_params``).
+_ATTEMPT_ONLY_PARAMS = {'prompt.submit': frozenset({'staged_attachment_paths', 'client_send_id'})}
+
 
 def display_projection(history, profile_home):
     """Main's TUI display rows for a snapshot's stored rows: the sidecar's own
@@ -316,6 +324,8 @@ class AuthorityConnection:
             # unknown keys; every other handler validates ``profile`` itself.
             if method in _PROFILE_IMPLICIT:
                 params = {key: value for key, value in params.items() if key != 'profile'}
+        if method in _ATTEMPT_ONLY_PARAMS and _ATTEMPT_ONLY_PARAMS[method] & params.keys():
+            params = {key: value for key, value in params.items() if key not in _ATTEMPT_ONLY_PARAMS[method]}
         ref = SessionRef(self.actor.profile_id, params.get('session_id', ''))
         from tui_gateway.contracts.registry import (
             CANONICAL_METHODS, METHODS, canonical_param_problems, check_params_accepted, check_result,
