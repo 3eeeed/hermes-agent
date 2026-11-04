@@ -951,6 +951,11 @@ def _cmd_retitle_skills(db, args):
         print(f"✓ Re-titled {changed} session(s).")
 
 
+def _cmd_retitle_smart(db, args):
+    from hermes_cli.sessions_retitle_smart import cmd_retitle_smart
+    return cmd_retitle_smart(db, args)
+
+
 def _cmd_browse(db, args):
     limit = getattr(args, "limit", 500) or 500
     sessions = _surface_reader(db).list_sessions_rich(
@@ -1381,7 +1386,7 @@ _DB_HANDLERS = {
     "list": _cmd_list, "export": _cmd_export, "delete": _cmd_delete, "rename": _cmd_rename, "pinned": _cmd_pinned,
     "prune": partial(_cmd_prune_or_archive, action="prune"), "pin": partial(_cmd_pin, pinning=True),
     "archive": partial(_cmd_prune_or_archive, action="archive"), "unpin": partial(_cmd_pin, pinning=False),
-    "retitle-skills": _cmd_retitle_skills, "browse": _cmd_browse, "optimize": _cmd_optimize,
+    "retitle-skills": _cmd_retitle_skills, "retitle-smart": _cmd_retitle_smart, "browse": _cmd_browse, "optimize": _cmd_optimize,
     "clean-markers": _cmd_clean_markers, "optimize-storage": _cmd_optimize_storage,
     "repair-routing": _cmd_repair_routing, "repair-prompts": _cmd_repair_prompts, "stats": _cmd_stats,
     "refresh-prompts": _cmd_refresh_prompts,

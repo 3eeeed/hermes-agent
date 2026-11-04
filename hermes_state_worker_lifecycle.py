@@ -60,12 +60,14 @@ def worker_lifecycle(db, conn, session_id, payload):
 
 
 def worker_title(db, conn, session_id, payload):
-    if (set(payload) != {'title', 'source'} or payload['source'] not in ('user', 'derived', 'llm')
-            or not (payload['title'] is None or isinstance(payload['title'], str))):
+    if (set(payload) - {'replace_equal'} != {'title', 'source'} or payload['source'] not in ('user', 'derived', 'llm')
+            or not (payload['title'] is None or isinstance(payload['title'], str))
+            or not isinstance(payload.get('replace_equal', False), bool)):
         raise RuntimeStoreError('invalid_params')
     try:
         value = bool(db._set_session_title_in_transaction(
-            conn, session_id, payload['title'], source=payload['source']))
+            conn, session_id, payload['title'], source=payload['source'],
+            replace_equal=payload.get('replace_equal', False)))
     except ValueError:
         # Expected validation/conflict outcomes must not poison the retry journal.
         # Keep candidate authority in the receipt, not an in-memory worker claim.

@@ -80,18 +80,22 @@ class SessionTitlesMixin:
             SELECT 1 FROM ancestors WHERE id = ? AND id != ? LIMIT 1
             """, (descendant_id, ancestor_id, descendant_id)).fetchone() is not None
 
-    def _set_session_title(self, session_id: str, title: str, *, source: str) -> bool:
+    def _set_session_title(self, session_id: str, title: str, *, source: str, replace_equal: bool = False) -> bool:
         """Write a title, enforcing provenance precedence. A ``user`` write always lands;
         ``derived``/``llm`` land only when the row is untitled or holds strictly lower
         authority (derived upgrades to llm exactly once, nothing overwrites a user name,
         re-running the titler on an llm row is a no-op). No writer may move a hidden
         canonical Bot Chat off its title. Read and write are one compare-and-swap
-        transaction, so a manual ``/title`` racing an in-flight generation is not clobbered."""
+        transaction, so a manual ``/title`` racing an in-flight generation is not clobbered.
+        ``replace_equal`` lets an automatic write replace a title of the SAME authority (the rolling
+        ``llm`` refresh that renames a session as it grows); a higher authority still wins."""
         return bool(self._execute_write(
-            lambda conn: self._set_session_title_in_transaction(conn, session_id, title, source=source)
+            lambda conn: self._set_session_title_in_transaction(
+                conn, session_id, title, source=source, replace_equal=replace_equal)
         ))
 
-    def _set_session_title_in_transaction(self, conn, session_id: str, title: str, *, source: str):
+    def _set_session_title_in_transaction(self, conn, session_id: str, title: str, *, source: str,
+                                          replace_equal: bool = False):
         """Reuse title rules within an authority-owned transaction; never commit here."""
         title = self.sanitize_title(title)
         is_user = source == self.TITLE_SOURCE_USER
@@ -114,8 +118,10 @@ class SessionTitlesMixin:
                                  "identity, and renaming it would orphan the conversation. "
                                  "To start fresh, create a new bot instead.")
             return []
-        if not is_user and current["title"] is not None and self._title_rank(current["title_source"]) >= new_rank:
-            return []
+        if not is_user and current["title"] is not None:
+            current_rank = self._title_rank(current["title_source"])
+            if current_rank > new_rank or (current_rank == new_rank and not replace_equal):
+                return []
         if title:
             cleared = self._resolve_title_conflict(conn, session_id, title)
             if cleared:
@@ -167,11 +173,13 @@ class SessionTitlesMixin:
         ValueError on conflict or validation failure."""
         return self._set_session_title(session_id, title, source=self.TITLE_SOURCE_USER)
 
-    def set_auto_title(self, session_id: str, title: str, *, source: str) -> bool:
-        """Set an automatic title; False (untouched) when a higher-authority title holds the row."""
+    def set_auto_title(self, session_id: str, title: str, *, source: str, replace_equal: bool = False) -> bool:
+        """Set an automatic title; False (untouched) when a higher-authority title holds the row.
+        ``replace_equal=True`` also replaces a title of the same authority (``llm`` refresh); a
+        ``user`` title is never replaced by an automatic write."""
         if source not in (self.TITLE_SOURCE_DERIVED, self.TITLE_SOURCE_LLM):
             raise ValueError(f"invalid automatic title source: {source!r}")
-        return self._set_session_title(session_id, title, source=source)
+        return self._set_session_title(session_id, title, source=source, replace_equal=bool(replace_equal))
 
     def get_session_title(self, session_id: str) -> Optional[str]:
         """Get the title for a session, or None."""

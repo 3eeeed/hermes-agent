@@ -22,11 +22,14 @@ class RuntimeSessionLifecycleMixin:
         self._session(session_id)
         return self._title_result(self._apply('session.title', {'title': title, 'source': 'user'}))
 
-    def set_auto_title(self, session_id, title, *, source):
+    def set_auto_title(self, session_id, title, *, source, replace_equal=False):
         if source not in ('derived', 'llm'):
             raise ValueError(f'invalid automatic title source: {source!r}')
         self._session(session_id)
-        return self._title_result(self._apply('session.title', {'title': title, 'source': source}))
+        payload = {'title': title, 'source': source}
+        if replace_equal:
+            payload['replace_equal'] = True
+        return self._title_result(self._apply('session.title', payload))
 
     @staticmethod
     def _title_result(result):
