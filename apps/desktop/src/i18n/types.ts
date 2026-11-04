@@ -2779,6 +2779,8 @@ export interface Translations extends NoticeTranslations {
       merged: string
       closed: string
       noPR: string
+      /** Only sessions whose written files are still uncommitted in git. */
+      unfinished: string
     }
     gatewayGroups: {
       grouping: string
@@ -2858,6 +2860,8 @@ export interface Translations extends NoticeTranslations {
       backgroundRunning: string
       draftSession: string
       handoffOrigin: (platform: string) => string
+      /** Tooltip of the row's unfinished-work dot: `count` files changed without a commit. */
+      unfinishedWork: (count: number) => string
       ownedByProfile: (profile: string) => string
       renamed: string
       renameFailed: string

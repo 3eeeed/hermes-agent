@@ -2400,7 +2400,8 @@ export const ruOverrides = {
       idle: 'Бездействие',
       filters: 'Фильтры',
       resetToDefaults: 'Сбросить настройки',
-      noPR: 'Без PR'
+      noPR: 'Без PR',
+      unfinished: 'Незавершённые'
     },
     gatewayGroups: {
       grouping: 'Шлюз и профиль',
@@ -2480,6 +2481,7 @@ export const ruOverrides = {
       backgroundRunning: 'Фоновая задача выполняется',
       draftSession: 'Черновик — ещё ничего не отправлено',
       handoffOrigin: platform => `Передано из ${platform}`,
+      unfinishedWork: count => `Незакоммиченных изменённых файлов: ${count}`,
       ownedByProfile: profile => `Профиль: ${profile}`,
       renamed: 'Переименовано',
       renameFailed: 'Переименование не удалось',

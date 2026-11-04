@@ -54,6 +54,7 @@ import { SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
 import { sessionRowDetails } from './session-row-details'
 import { resolveSessionRowClick } from './session-row-gesture'
 import { SessionRowSlot } from './session-row-slots'
+import { UnfinishedWorkDot } from './unfinished-work'
 import { useProfilePrewarm } from './use-profile-prewarm'
 
 interface SidebarSessionRowProps extends React.ComponentProps<'div'> {
@@ -576,6 +577,7 @@ function SidebarSessionRowImpl({
                       </span>
                     )}
                   </span>
+                  <UnfinishedWorkDot className="self-center" session={session} />
                   <SessionRowSlot area={SESSION_ROW_AREAS.trailing} sessionId={sessionPinId(session)} />
                 </>
               )
@@ -599,6 +601,7 @@ function SidebarSessionRowImpl({
                   >
                     {context}
                   </span>
+                  <UnfinishedWorkDot session={session} />
                   {handoffBadge}
                   <SessionRowSlot area={SESSION_ROW_AREAS.trailing} sessionId={sessionPinId(session)} />
                   {actionsNode}

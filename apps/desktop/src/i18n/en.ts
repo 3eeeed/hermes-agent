@@ -3164,7 +3164,8 @@ export const en: Translations = {
       open: 'Open',
       merged: 'Merged',
       closed: 'Closed',
-      noPR: 'No PR'
+      noPR: 'No PR',
+      unfinished: 'Unfinished'
     },
     gatewayGroups: {
       grouping: 'Gateway & profile',
@@ -3251,6 +3252,7 @@ export const en: Translations = {
       backgroundRunning: 'Background task running',
       draftSession: 'Draft — nothing sent yet',
       handoffOrigin: platform => `Handed off from ${platform}`,
+      unfinishedWork: count => `${count} ${count === 1 ? 'file' : 'files'} changed without a commit`,
       ownedByProfile: profile => `Profile: ${profile}`,
       renamed: 'Renamed',
       renameFailed: 'Rename failed',

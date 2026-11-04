@@ -3588,7 +3588,8 @@ export const esOverrides = {
       open: 'Abierta',
       merged: 'Fusionada',
       closed: 'Cerrada',
-      noPR: 'Sin PR'
+      noPR: 'Sin PR',
+      unfinished: 'Sin terminar'
     },
     gatewayGroups: {
       grouping: 'Gateway y perfil',
@@ -3676,6 +3677,7 @@ export const esOverrides = {
       backgroundRunning: 'Tarea en segundo plano en ejecución',
       draftSession: 'Borrador — aún no se ha enviado nada',
       handoffOrigin: platform => `Transferido desde ${platform}`,
+      unfinishedWork: count => `${count} ${count === 1 ? 'archivo modificado' : 'archivos modificados'} sin commit`,
       ownedByProfile: profile => `Perfil: ${profile}`,
       renamed: 'Renombrada',
       renameFailed: 'No se pudo renombrar',

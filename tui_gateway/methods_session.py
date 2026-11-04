@@ -544,18 +544,18 @@ def _(rid, params: dict, db) -> dict:
         # surfaces that OWN hidden sessions (Bots pane, pickers).
         from pathlib import Path
 
-        from hermes_cli.session_listing import show_subagent_sessions
+        from hermes_cli import session_listing, session_work_status as work
 
         # ``sessions.show_subagents`` (the store's own profile config) re-admits delegate runs (#97202).
         # A store without a path has no profile config to read, so it keeps the default shape.
         db_path = getattr(db, "db_path", None)
-        include_subagents = bool(db_path) and show_subagent_sessions(Path(db_path).parent)
+        include_subagents = bool(db_path) and session_listing.show_subagent_sessions(Path(db_path).parent)
         rows = _listing_rows(db, max(limit * 2, 200), include_hidden=_flag(params, "include_hidden"),
                              include_subagents=include_subagents)[:limit]
         # No live_message_count here on purpose: the bulk listing serves rows whose open
         # paths never demand history (expectHistory defaults false); the count is a
         # per-session scan and would turn one listing call into hundreds of them.
-        return _ok(rid, {"sessions": [_session_row_summary(s) for s in rows]})
+        return _ok(rid, {"sessions": work.annotate_db_rows([_session_row_summary(s) for s in rows], db_path)})
     except Exception as e:
         return _err(rid, 5006, str(e))
 

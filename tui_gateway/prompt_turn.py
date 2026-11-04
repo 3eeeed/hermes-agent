@@ -1330,6 +1330,12 @@ def _post_turn_housekeeping(sid: str, session: dict, st: _TurnRun) -> None:
             trim_memory(reason="tui turn completion")
     except Exception:
         logger.debug("post-turn memory trim failed", exc_info=True)
+    try:  # the turn may have written files: rescan this profile's uncommitted work soon
+        from hermes_cli.session_work_status import notify_activity
+        from hermes_constants import get_hermes_home
+        notify_activity(session.get("profile_home") or get_hermes_home())
+    except Exception:
+        logger.debug("unfinished-work rescan request failed", exc_info=True)
     if st.scopes.home is not None:
         reset_hermes_home_override(st.scopes.home)
 
