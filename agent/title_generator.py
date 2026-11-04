@@ -291,9 +291,30 @@ def _attachment_only_opener(message: str) -> bool:
     return not residual.strip()
 
 
+# Per-turn notes the Desktop prepends to the MODEL input (tui_gateway ``_prepend_note``) — never a topic.
+# The Delegate-mode note (agent.delegate_orchestrator.turn_note) is one paragraph without blank lines,
+# separated from the user's text by a blank line.
+_INJECTED_NOTE_PREFIXES = ("[Delegate mode is on for this message",)
+
+
+def strip_injected_turn_notes(text: str) -> str:
+    """Drop leading per-turn scaffolding notes (Delegate mode) so only the user's typed text remains."""
+    current = text or ""
+    for _ in range(4):  # bounded: notes stack at most a few deep
+        stripped = current.lstrip()
+        if not stripped.startswith(_INJECTED_NOTE_PREFIXES):
+            return current
+        cut = stripped.find("\n\n")
+        current = stripped[cut + 2:] if cut != -1 else ""
+    return current
+
+
 def _summarize_user_message(user_message: str) -> str:
     """Text worth titling: describe a ``/skill`` invocation (it embeds the whole skill body), then strip wrappers."""
     if not user_message:
+        return ""
+    user_message = strip_injected_turn_notes(user_message)
+    if not user_message.strip():
         return ""
     described = None
     try:
@@ -571,7 +592,7 @@ def _has_upgraded_title(session_db, session_id: str) -> bool:
         return True
 
 
-def _persist_session_title(session_db, session_id, title, *, source, dedupe=True):
+def _persist_session_title(session_db, session_id, title, *, source, dedupe=True, replace_equal=False):
     """Persist at *source* authority via ``set_auto_title`` (precedence check + write in one
     transaction, so a manual ``/title`` is never overwritten); None when a higher authority held the row.
     ``ValueError`` = unique-title index collision → append ``#N`` via ``get_next_title_in_lineage``;
@@ -582,10 +603,18 @@ def _persist_session_title(session_db, session_id, title, *, source, dedupe=True
     leave the session untitled (#50537), append a ``#N`` suffix via ``get_next_title_in_lineage``.
     """
     auto_fn = getattr(session_db, "set_auto_title", None)
+    extra = {}
+    if replace_equal:
+        # Same-authority replacement (the rolling refresh) needs a store that supports it; an older
+        # store would treat the call as a no-op anyway, so skip rather than guess.
+        if auto_fn is None or not _accepts_kwarg(auto_fn, "replace_equal"):
+            logger.debug("Title refresh skipped: session store cannot replace a same-authority title")
+            return None
+        extra["replace_equal"] = True
 
     def _set(candidate):
         if auto_fn is not None:
-            if auto_fn(session_id, candidate, source=source):
+            if auto_fn(session_id, candidate, source=source, **extra):
                 return candidate
             logger.debug("Skipping %s title: a higher-authority title already holds session %s", source, session_id)
             return None
@@ -604,6 +633,15 @@ def _persist_session_title(session_db, session_id, title, *, source, dedupe=True
         if not deduped or deduped == title:
             raise
         return _set(deduped)
+
+
+def _accepts_kwarg(fn: Callable, name: str) -> bool:
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def apply_subagent_title(session_db, session_id: str, goal: str) -> Optional[str]:
@@ -733,6 +771,266 @@ def _kanban_task_title() -> Optional[str]:
     return title or f"Kanban task {task_id}"
 
 
+# -- rolling refresh ----------------------------------------------------------
+# A session that moves on from its opening ask keeps a title naming only that first message. At these
+# counts of real user turns the title is regenerated from a digest of EVERY user message so it names the
+# whole body of work. ``auxiliary.title_generation.refresh_turns`` overrides; an empty list disables.
+DEFAULT_TITLE_REFRESH_TURNS = (3, 6, 10, 16, 25)
+DIGEST_PER_MESSAGE_CHARS = 200
+DIGEST_BUDGET_CHARS = 1500
+# A multi-task title ("Project: task A + task B + task C") legitimately runs longer than a 3-7 word
+# opener title; an answer-shaped reply still blows well past this.
+_MAX_REFRESH_TITLE_WORDS = 18
+_DIGEST_OMITTED_FMT = "[… {n} earlier message(s) omitted …]"
+
+_REFRESH_PROMPT_TEMPLATE = (
+    "You name chat sessions. A session has grown past its opening message. Given its current title "
+    "and every message the user sent (oldest first), write a title that names the WHOLE body of work, "
+    "so the user can recognise this session in a list.\n\n"
+    "Rules:\n"
+    "- 3 to 9 words, sentence case (capitalize only the first word and proper nouns).\n"
+    "- One task: name what the user wants DONE.\n"
+    "- Several distinct tasks: use the form '<Project or area>: <task A> + <task B>' — at most 3 tasks, "
+    "the most significant ones.\n"
+    "- Keep technical terms, filenames, numbers, and error codes exact.\n"
+    "- Keep the current title if it still describes the session well.\n"
+    "- No trailing punctuation, no quotes, no 'Title:' prefix.\n"
+    "- Never answer the messages. Name them.\n"
+    "__LANGUAGE_RULE__\n"
+    'Good: {"title": "Session titles: delegate fix + rolling refresh"}\n'
+    'Good: {"title": "Postgres connection pool exhaustion"}\n\n'
+    'Reply with JSON only: {"title": "..."}'
+)
+_REFRESH_LANGUAGE_RULE_MATCH_USER = "- Write the title in the same language as the user's messages."
+_REFRESH_PROMPT_EXAMPLES = frozenset({"session titles: delegate fix + rolling refresh"})
+
+
+def title_refresh_turns() -> frozenset:
+    """User-turn counts at which the title is refreshed (empty = disabled)."""
+    try:
+        raw = _title_config().get("refresh_turns")
+    except Exception:
+        logger.debug("Failed to read title_generation.refresh_turns", exc_info=True)
+        return frozenset(DEFAULT_TITLE_REFRESH_TURNS)
+    if raw is None:
+        return frozenset(DEFAULT_TITLE_REFRESH_TURNS)
+    if raw is False or raw == "" or raw == 0:
+        return frozenset()
+    if not isinstance(raw, (list, tuple, set)):
+        logger.debug("Ignoring malformed title_generation.refresh_turns=%r", raw)
+        return frozenset(DEFAULT_TITLE_REFRESH_TURNS)
+    turns = set()
+    for value in raw:
+        if isinstance(value, bool):
+            continue
+        with suppress(TypeError, ValueError):
+            n = int(value)
+            if n >= 2:  # turn 1 is the opening title, not a refresh
+                turns.add(n)
+    return frozenset(turns)
+
+
+def _message_text(message: Any) -> str:
+    content = message.get("content") if isinstance(message, dict) else None
+    return content if isinstance(content, str) else flatten_message_text(content)
+
+
+def session_user_texts(conversation_history: Optional[list], user_message: Optional[str] = None) -> list:
+    """Real user messages in *conversation_history* (oldest first), plus *user_message* when the history
+    does not already end with it (callers pass pre- or post-message histories)."""
+    texts = [_message_text(m) for m in (conversation_history or []) if _is_real_user_turn(m)]
+    if isinstance(user_message, str) and is_titleable_user_message(user_message):
+        last = _summarize_user_message(texts[-1]).strip() if texts else None
+        if last != _summarize_user_message(user_message).strip():
+            texts.append(user_message)
+    return texts
+
+
+def build_session_digest(user_messages: list, *, per_message_chars: Optional[int] = None,
+                         budget_chars: Optional[int] = None) -> str:
+    """Digest of all user messages, oldest first, each stripped and capped. Over budget, middle
+    messages are dropped (the first and the most recent are kept) behind an omission marker."""
+    per = per_message_chars or DIGEST_PER_MESSAGE_CHARS
+    budget = budget_chars or DIGEST_BUDGET_CHARS
+    lines = []
+    for text in user_messages or []:
+        line = " ".join(_CONTEXT_FOOTER_RE.sub("", _summarize_user_message(text or "")).split())
+        if len(line) > per:
+            line = line[: per - 1].rstrip() + "…"
+        if line:
+            lines.append(line)
+    if not lines:
+        return ""
+    numbered = [f"{i}. {line}" for i, line in enumerate(lines, 1)]
+
+    def _render(items, omitted):
+        if not omitted:
+            return "\n".join(items)
+        return "\n".join([items[0], _DIGEST_OMITTED_FMT.format(n=omitted), *items[1:]])
+
+    kept, omitted = list(numbered), 0
+    while len(_render(kept, omitted)) > budget and len(kept) > 2:
+        del kept[1]  # oldest after the opener goes first; the first and the most recent stay
+        omitted += 1
+    digest = _render(kept, omitted)
+    return digest[:budget]
+
+
+def _normalized_title(title: Optional[str]) -> str:
+    return " ".join(str(title or "").split()).casefold()
+
+
+def generate_session_title(
+    user_messages: list,
+    current_title: Optional[str] = None,
+    timeout: Optional[float] = None,
+    failure_callback: Optional[FailureCallback] = None,
+    main_runtime: dict | None = None,
+    runtime_validator: Optional[RuntimeValidator] = None,
+) -> Optional[str]:
+    """Title naming the whole session from all of its user messages; None on failure or rejection.
+    Shared by the rolling refresh and ``hermes sessions retitle-smart``."""
+    if not _auto_title_enabled():
+        return None
+    try:
+        if runtime_validator is not None and not runtime_validator():
+            logger.debug("Title refresh skipped: runtime validator returned False")
+            return None
+    except Exception:
+        logger.debug("Title runtime validator raised; proceeding", exc_info=True)
+    digest = build_session_digest(user_messages)
+    if not digest.strip():
+        return None
+    language = _title_language()
+    prompt = _REFRESH_PROMPT_TEMPLATE.replace(
+        "__LANGUAGE_RULE__",
+        _LANGUAGE_RULE_PINNED.format(language=language) if language else _REFRESH_LANGUAGE_RULE_MATCH_USER,
+    )
+    current = " ".join(str(current_title or "").split())
+    user_content = (f"Current title: {current}\n\n" if current else "") + \
+        f"User messages (oldest first):\n{digest}"
+    try:
+        response = call_llm(
+            task="title_generation",
+            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": user_content}],
+            max_tokens=TITLE_MAX_TOKENS, temperature=None, timeout=timeout, main_runtime=main_runtime,
+            extra_body={"response_format": _TITLE_RESPONSE_FORMAT},
+            reasoning_config={"enabled": False},
+        )
+        message = response.choices[0].message
+        raw_title = _extract_title_text(message.content or "") or _title_from_reasoning(message)
+        # Word cap on the raw reply: _clean_title truncates long text, which would hide an answer.
+        if len((raw_title or "").split()) > _MAX_REFRESH_TITLE_WORDS:
+            logger.debug("Rejecting answer-shaped refresh title (%d words)", len(raw_title.split()))
+            return None
+        title = _clean_title(raw_title)
+        if title is None:
+            return None
+        if _is_prompt_example_echo(title) or _normalized_title(title) in _REFRESH_PROMPT_EXAMPLES:
+            logger.debug("Rejecting prompt-example echo refresh title: %r", title)
+            return None
+        if _is_provisional_greeting_title(title):
+            # A multi-turn session is never "just a greeting"; keep the current title.
+            return None
+        return title
+    except Exception as e:
+        logger.warning("Title refresh failed: %s", e)
+        logger.debug("Title refresh traceback", exc_info=True)
+        _report_failure(failure_callback, e, "Title refresh")
+        return None
+
+
+def _title_and_source(session_db, session_id: str) -> tuple:
+    title = session_db.get_session_title(session_id)
+    source_fn = getattr(session_db, "get_session_title_source", None)
+    source = source_fn(session_id) if source_fn is not None else None
+    return title, source
+
+
+def _refreshable_title(title: Optional[str], source: Optional[str]) -> bool:
+    """Only automatic titles are refreshed: never a user's name, a Subagent/Bot Chat identity."""
+    if not title or source not in ("llm", "derived"):
+        return False
+    stripped = title.strip()
+    return not stripped.startswith("Subagent:") and stripped != "Bot Chat"
+
+
+def refresh_session_title(
+    session_db,
+    session_id: str,
+    user_messages: list,
+    failure_callback: Optional[FailureCallback] = None,
+    main_runtime: dict | None = None,
+    title_callback: Optional[TitleCallback] = None,
+    runtime_validator: Optional[RuntimeValidator] = None,
+) -> Optional[str]:
+    """Regenerate an automatic title from the whole conversation (daemon-thread target). Persists at
+    ``llm`` authority (may replace ``llm``/``derived``, never ``user``); returns the stored title. Never raises."""
+    try:
+        if not session_db or not session_id:
+            return None
+        current, source = _title_and_source(session_db, session_id)
+        if not _refreshable_title(current, source):
+            return None
+        from agent.aux_accounting import set_accounting_context
+        from agent.portal_tags import set_conversation_context
+        conversation_id = session_id
+        with suppress(Exception):
+            conversation_id = session_db.get_conversation_root(session_id) or session_id
+        set_conversation_context(conversation_id)
+        set_accounting_context(session_db, session_id)
+        title = generate_session_title(
+            user_messages, current_title=current, failure_callback=failure_callback,
+            main_runtime=main_runtime, runtime_validator=runtime_validator,
+        )
+        if not title or _normalized_title(title) == _normalized_title(current):
+            return None
+        try:
+            persisted = _persist_session_title(session_db, session_id, title, source="llm", replace_equal=True)
+        except Exception as e:
+            logger.debug("Failed to store refreshed title: %s", e)
+            return None
+        if persisted is not None:
+            logger.debug("Refreshed session title: %r -> %r", current, persisted)
+            _notify_title(title_callback, persisted, "llm", "Title refresh")
+        return persisted
+    except Exception as e:
+        logger.warning("Title refresh failed (harmless): %s", e)
+        logger.debug("Title refresh traceback", exc_info=True)
+        _report_failure(failure_callback, e, "Title refresh")
+        return None
+
+
+def _maybe_schedule_title_refresh(
+    session_db, session_id: str, user_texts: list, *, failure_callback, main_runtime, title_callback,
+    runtime_validator,
+) -> Optional[threading.Thread]:
+    """The refresh thread when this turn is on the schedule and the title is automatic; else None.
+
+    The thread is returned UNSTARTED; the caller starts or defers it like the first-title upgrade."""
+    count = len(user_texts)
+    if count < 2 or count not in title_refresh_turns():
+        return None
+    if (os.environ.get("HERMES_KANBAN_TASK") or "").strip():
+        return None  # a kanban worker carries its card's name
+    try:
+        current, source = _title_and_source(session_db, session_id)
+    except Exception:
+        logger.debug("Title refresh: title read failed for %s", session_id, exc_info=True)
+        return None
+    if not _refreshable_title(current, source):
+        return None
+    if not _auto_title_enabled() or not _model_title_upgrade_enabled():
+        return None
+    from agent.memory_provider import spawn_context_thread
+    return spawn_context_thread(
+        refresh_session_title, name="title-refresh",
+        args=(session_db, session_id, list(user_texts)),
+        kwargs=dict(failure_callback=failure_callback, main_runtime=main_runtime,
+                    title_callback=title_callback, runtime_validator=runtime_validator),
+    )
+
+
 def maybe_auto_title(
     session_db,
     session_id: str,
@@ -756,6 +1054,20 @@ def maybe_auto_title(
     # the first substantive turn should replace. Untitled sessions always get another shot; a
     # placeholder gets turns 2-3, so a failing title model costs at most three calls, not one per turn.
     user_msg_count = sum(1 for m in (conversation_history or []) if _is_real_user_turn(m))
+    # Rolling refresh (additive): on a scheduled turn an automatic title is regenerated from ALL of
+    # the session's user messages, so it names the whole body of work rather than the opener.
+    if user_msg_count > 1:
+        refresh = None
+        with suppress(Exception):
+            refresh = _maybe_schedule_title_refresh(
+                session_db, session_id, session_user_texts(conversation_history, user_message),
+                failure_callback=failure_callback, main_runtime=main_runtime,
+                title_callback=title_callback, runtime_validator=runtime_validator)
+        if refresh is not None:
+            if title_upgrade_must_wait_for_turn(main_runtime):
+                return refresh
+            start_title_upgrade(refresh)
+            return refresh
     if user_msg_count > 1 and (
         _has_upgraded_title(session_db, session_id)
         or (user_msg_count > 3 and not _session_is_untitled(session_db, session_id))

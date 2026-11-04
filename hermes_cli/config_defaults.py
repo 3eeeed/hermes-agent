@@ -761,6 +761,9 @@ DEFAULT_CONFIG = {
         "title_generation": {
             "enabled": True,
             "model_upgrade_enabled": True,  # False = keep the instant derived title, never call a model
+            # User-turn counts at which an automatic title is regenerated from ALL user messages so it
+            # names the whole session, not just the opener. [] disables the rolling refresh.
+            "refresh_turns": [3, 6, 10, 16, 25],
             # session_search no longer uses an aux LLM (#27590); leftover auxiliary.session_search is ignored.
             "provider": "auto",
             "model": "",
