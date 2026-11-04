@@ -840,8 +840,13 @@ def session_user_texts(conversation_history: Optional[list], user_message: Optio
     does not already end with it (callers pass pre- or post-message histories)."""
     texts = [_message_text(m) for m in (conversation_history or []) if _is_real_user_turn(m)]
     if isinstance(user_message, str) and is_titleable_user_message(user_message):
+        current = _summarize_user_message(user_message).strip()
         last = _summarize_user_message(texts[-1]).strip() if texts else None
-        if last != _summarize_user_message(user_message).strip():
+        if last is not None and (last == current or last.endswith(current)):
+            # Post-message history: the stored turn may carry injected context ahead of the typed
+            # text (gateway reply/quote prefixes); the clean title text stands in for it.
+            texts[-1] = user_message
+        else:
             texts.append(user_message)
     return texts
 

@@ -115,6 +115,9 @@ class TestDigest:
         assert session_user_texts(hist, "c three") == ["a one", "b two", "c three"]
         assert session_user_texts(hist + [{"role": "user", "content": "c three"}], "c three") == [
             "a one", "b two", "c three"]
+        # The stored turn carries injected context around the typed text: counted once, clean.
+        wrapped = hist + [{"role": "user", "content": "[Replying to: earlier]\n\nc three"}]
+        assert session_user_texts(wrapped, "c three") == ["a one", "b two", "c three"]
 
 
 class TestRefreshSchedule:
