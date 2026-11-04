@@ -178,7 +178,8 @@ export const arChrome = {
       open: 'مفتوح',
       merged: 'مدمج',
       closed: 'مغلق',
-      noPR: 'لا يوجد PR'
+      noPR: 'لا يوجد PR',
+      unfinished: 'مخلصتش'
     },
     gatewayGroups: {
       grouping: 'البوابة والملف الشخصي',
@@ -328,6 +329,7 @@ export const arChrome = {
       ownedByProfile: profile => `مملوكة للملف الشخصي ${profile}`,
       untitledChat: id => `محادثة ${id}`,
       handoffOrigin: platform => `قادمة من ${platform}`,
+      unfinishedWork: count => `فيه ${count} ملف متعدل من غير كوميت`,
       renamed: 'تمت إعادة التسمية',
       renameFailed: 'فشلت إعادة التسمية',
       renameTitle: 'إعادة تسمية الجلسة',

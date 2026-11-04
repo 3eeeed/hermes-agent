@@ -108,6 +108,14 @@ class SessionLiveInfo(OpenModel):
     lazy: bool | None = None
 
 
+class SessionUnfinished(Result):
+    """``hermes_cli.session_work_status.wire_status``: files this conversation wrote are still
+    uncommitted in git (last background scan). Absent when clean."""
+
+    dirty_count: int
+    repos: list[str]
+
+
 class StoredSessionRow(OpenModel):
     """One ``sessions`` row as ``hermes_state`` lists it (``session.list`` / ``session.info`` rows /
     ``sessions.changed``)."""
@@ -141,6 +149,7 @@ class StoredSessionRow(OpenModel):
     # #121148: provenance of a projected continuation tip — 'compression' when the row
     # continues a sealed segment (automatic rotation), None for plain rows and branches.
     continuation_kind: str | None = None
+    unfinished: SessionUnfinished | None = None
 
 
 class ToolLabelKind(WireEnum):

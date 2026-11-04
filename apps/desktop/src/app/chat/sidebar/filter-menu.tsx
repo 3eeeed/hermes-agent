@@ -35,6 +35,7 @@ import {
   $sidebarShowAllSessions,
   $sidebarShowArchived,
   $sidebarStatusFilter,
+  $sidebarUnfinishedFilter,
   $sidebarViewCustomized,
   $sidebarWorkspaceNodeOpen,
   resetSidebarView,
@@ -52,7 +53,8 @@ import {
   toggleSidebarProfileFilter,
   toggleSidebarProjectFilter,
   toggleSidebarRowMeta,
-  toggleSidebarStatusFilter
+  toggleSidebarStatusFilter,
+  toggleSidebarUnfinishedFilter
 } from '@/store/layout'
 import {
   $profiles,
@@ -174,6 +176,7 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
   const narrowsByProfile = showAllProfiles && profileNames.length > 1
   const prFilter = useStore($sidebarPrFilter)
   const showArchived = useStore($sidebarShowArchived)
+  const unfinishedOnly = useStore($sidebarUnfinishedFilter)
   const filtersActive = useStore($sidebarFiltersActive)
   const viewCustomized = useStore($sidebarViewCustomized)
   const nodeOpen = useStore($sidebarWorkspaceNodeOpen)
@@ -428,6 +431,12 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
               option={{ id: 'all-profiles', label: t.profiles.allProfiles }}
             />
           )}
+
+          <OptionCheckbox
+            checked={unfinishedOnly}
+            onCheck={toggleSidebarUnfinishedFilter}
+            option={{ dot: 'size-1.5 rounded-full border border-amber-500', id: 'unfinished', label: f.unfinished }}
+          />
 
           <OptionCheckbox
             checked={showArchived}

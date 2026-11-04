@@ -31318,6 +31318,17 @@
             "default": null,
             "title": "Continuation Kind"
           },
+          "unfinished": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionUnfinished"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "profile": {
             "anyOf": [
               {
@@ -37927,6 +37938,17 @@
             ],
             "default": null,
             "title": "Lineage Root Id"
+          },
+          "unfinished": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionUnfinished"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
@@ -39300,6 +39322,29 @@
           "removed"
         ],
         "title": "SessionUndoResult",
+        "type": "object"
+      },
+      "SessionUnfinished": {
+        "additionalProperties": false,
+        "description": "``hermes_cli.session_work_status.wire_status``: files this conversation wrote are still\nuncommitted in git (last background scan). Absent when clean.",
+        "properties": {
+          "dirty_count": {
+            "title": "Dirty Count",
+            "type": "integer"
+          },
+          "repos": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Repos",
+            "type": "array"
+          }
+        },
+        "required": [
+          "dirty_count",
+          "repos"
+        ],
+        "title": "SessionUnfinished",
         "type": "object"
       },
       "SessionUsageParams": {

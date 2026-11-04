@@ -283,8 +283,11 @@ def _sessions_sig():
     change signal. Hashing only those rows avoids false Desktop refreshes from
     unrelated state.db writes such as gateway heartbeats.
     """
+    from hermes_cli.session_work_status import snapshot_signature
+    # The background unfinished-work scan lands without any state.db write; its digest is part
+    # of the signal so the sidebar's dots follow a commit made outside Hermes.
     return tuple(
-        _session_db_content_sig(root / "state.db")
+        (_session_db_content_sig(root / "state.db"), snapshot_signature(root))
         for root in (_watcher_home(), *_served_profile_homes)
     )
 

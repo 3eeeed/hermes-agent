@@ -226,6 +226,8 @@ def get_sessions(
             total = db.session_count(exclude_children=True, **scope)
             now = time.time()
             row_profile = profile_name or _cron_default_profile()
+            from hermes_cli.session_work_status import annotate_rows
+            annotate_rows(sessions, Path(db.db_path).parent)
             for s in sessions:
                 s["is_active"] = _is_active(s, now)
                 s["profile"] = row_profile

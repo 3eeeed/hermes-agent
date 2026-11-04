@@ -350,6 +350,9 @@ def _project_tree_inputs(
         include_children=False, exclude_sources=_PROJECT_TREE_EXCLUDED_SOURCES,
         include_archived=False, compact_rows=True)
     sessions = [_project_tree_row(r) for r in rows]
+    if db_path := getattr(db, "db_path", None):
+        from hermes_cli.session_work_status import annotate_rows
+        annotate_rows(sessions, os.path.dirname(str(db_path)))
     # Parallel-warm the git cache so build_tree's resolver doesn't cold-probe each cwd in turn.
     git_probe.warm_roots(s["cwd"] for s in sessions if s.get("cwd"))
     from hermes_cli import projects_db as pdb
