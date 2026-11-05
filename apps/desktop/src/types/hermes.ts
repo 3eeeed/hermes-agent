@@ -1,4 +1,4 @@
-import type { ConnectionRequestPayload, FreeTierChallengePayload, ToolLabel } from '@hermes/shared'
+import type { ConnectionRequestPayload, FreeTierChallengePayload, SessionListRow, ToolLabel } from '@hermes/shared'
 
 import type { ToolResultMetadata } from '@/lib/tool-result-metadata'
 
@@ -694,7 +694,7 @@ export interface SessionCreateResponse {
   stored_session_id?: string
 }
 
-export interface SessionInfo {
+export interface SessionInfo extends Pick<SessionListRow, 'unfinished'> {
   archived?: boolean
   cwd?: null | string
   /** Git branch checked out in {@link cwd} when the session started/resumed.

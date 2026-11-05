@@ -3628,7 +3628,8 @@ export const deOverrides = {
       open: 'Offen',
       merged: 'Gemergt',
       closed: 'Geschlossen',
-      noPR: 'Kein PR'
+      noPR: 'Kein PR',
+      unfinished: 'Unfertig'
     },
     gatewayGroups: {
       grouping: 'Gateway & Profil',
@@ -3716,6 +3717,7 @@ export const deOverrides = {
       backgroundRunning: 'Hintergrundaufgabe läuft',
       draftSession: 'Entwurf – noch nichts gesendet',
       handoffOrigin: platform => `Übergeben von ${platform}`,
+      unfinishedWork: count => `${count} ${count === 1 ? 'Datei' : 'Dateien'} ohne Commit geändert`,
       ownedByProfile: profile => `Profil: ${profile}`,
       renamed: 'Umbenannt',
       renameFailed: 'Umbenennen fehlgeschlagen',

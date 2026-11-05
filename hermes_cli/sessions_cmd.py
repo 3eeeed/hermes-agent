@@ -951,6 +951,11 @@ def _cmd_retitle_skills(db, args):
         print(f"✓ Re-titled {changed} session(s).")
 
 
+def _cmd_retitle_smart(db, args):
+    from hermes_cli.sessions_retitle_smart import cmd_retitle_smart
+    return cmd_retitle_smart(db, args)
+
+
 def _cmd_browse(db, args):
     limit = getattr(args, "limit", 500) or 500
     sessions = _surface_reader(db).list_sessions_rich(
@@ -1369,19 +1374,25 @@ def _cmd_adopt(args):
     return cmd_adopt(args)
 
 
+def _cmd_unfinished(args):
+    from hermes_cli.sessions_unfinished import cmd_unfinished
+    return cmd_unfinished(args)
+
+
 _PRE_DB_HANDLERS = {
     "repair": _cmd_repair, "recover": _cmd_recover, "import": _cmd_import,
     "repair-profiles": _cmd_repair_profiles,  # opens every profile's store itself
     "set-journal-mode": _cmd_set_journal_mode,  # offline: must not open the store it converts
     "discard": _cmd_discard,  # a gateway control (prompt.resolve_unknown), never a direct store write
     "adopt": _cmd_adopt,  # native resumes on the owner; reads its own store read-only
+    "unfinished": _cmd_unfinished,  # read-only store scan + git; owns its own cache file
 }
 _OBSERVATIONAL_DB_ACTIONS = frozenset({"list", "stats", "pinned"})
 _DB_HANDLERS = {
     "list": _cmd_list, "export": _cmd_export, "delete": _cmd_delete, "rename": _cmd_rename, "pinned": _cmd_pinned,
     "prune": partial(_cmd_prune_or_archive, action="prune"), "pin": partial(_cmd_pin, pinning=True),
     "archive": partial(_cmd_prune_or_archive, action="archive"), "unpin": partial(_cmd_pin, pinning=False),
-    "retitle-skills": _cmd_retitle_skills, "browse": _cmd_browse, "optimize": _cmd_optimize,
+    "retitle-skills": _cmd_retitle_skills, "retitle-smart": _cmd_retitle_smart, "browse": _cmd_browse, "optimize": _cmd_optimize,
     "clean-markers": _cmd_clean_markers, "optimize-storage": _cmd_optimize_storage,
     "repair-routing": _cmd_repair_routing, "repair-prompts": _cmd_repair_prompts, "stats": _cmd_stats,
     "refresh-prompts": _cmd_refresh_prompts,

@@ -8,8 +8,8 @@ from __future__ import annotations
 from pydantic import Field
 
 from .base import JsonValue, Params, Result, WireEnum
-from .common import (OpenModel, PendingApproval, ProfileParams, SessionLiveInfo, SessionParams, TranscriptMessage,
-                     Usage)
+from .common import (OpenModel, PendingApproval, ProfileParams, SessionLiveInfo, SessionParams, SessionUnfinished,
+                     TranscriptMessage, Usage)
 from .connectors_operation import ConnectionRequestPayload
 from .registry import method
 
@@ -239,6 +239,7 @@ class SessionListRow(Result):
     # Durable lineage root of a compressed conversation (REST parity, #66663); None on
     # rows that are not projected compression tips.
     lineage_root_id: str | None = Field(default=None, alias="_lineage_root_id")
+    unfinished: SessionUnfinished | None = None
 
 
 class SessionListResult(Result):

@@ -1800,6 +1800,7 @@ Subcommands:
 | `repair-profiles` | Settle session, routing, Telegram-topic and voice-mode state that landed under the wrong profile (rows in another profile's store, labels disagreeing with the session key, parent links crossing profiles, index rows for deleted profiles). Dry-run by default; `--apply` performs the repairs after snapshotting every store (stop the gateway first); `--legacy-main rekey\|move` decides what `agent:main` rows inside a named profile's store are; `--json` for automation. See [Sessions → Repair State Crossed Between Profiles](../user-guide/sessions.md#repair-state-crossed-between-profiles). |
 | `recover` | Offline, non-destructive recovery of a damaged `state.db` into a separate clean database. |
 | `retitle-skills` | Regenerate titles for sessions opened with a `/skill`, using what the user actually typed; lists changes unless `--apply` is passed. |
+| `retitle-smart` | Propose titles naming ALL the work in each session (every user message across compression continuations) for non-archived desktop/discord/cli/tui sessions with 2+ turns. Dry run unless `--apply`; `--json-out PATH`, `--limit N`, `--since DAYS`, `--session-id ID` (repeatable). Never replaces a title you set. |
 
 ## `hermes insights`
 

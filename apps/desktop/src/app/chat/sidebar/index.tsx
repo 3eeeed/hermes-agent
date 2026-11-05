@@ -47,8 +47,6 @@ import {
   $sidebarOrdering,
   $sidebarPinsOpen,
   $sidebarPrDataWanted,
-  $sidebarPrFilter,
-  $sidebarProfileFilter,
   $sidebarProjectFilter,
   $sidebarProjectOrderIds,
   $sidebarRecentsOpen,
@@ -56,7 +54,6 @@ import {
   $sidebarSessionOrderManual,
   $sidebarShowAllSessions,
   $sidebarShowArchived,
-  $sidebarStatusFilter,
   $sidebarWorkspaceOrderIds,
   $sidebarWorkspaceParentOrderIds,
   filterVisibleProjects,
@@ -84,7 +81,6 @@ import {
   type AgentProfileRoute,
   ALL_PROFILES,
   messagingTotalsKey,
-  normalizeProfileKey,
   sidebarProfileForScope
 } from '@/store/profile'
 import { $profileRailVisible } from '@/store/profile-rail-prefs'
@@ -107,8 +103,6 @@ import {
 } from '@/store/projects'
 import {
   $prBranchBySession,
-  $pullRequestsByBranch,
-  pullRequestBucket,
   recoverSessionPullRequests,
   refreshPullRequests,
   sessionPrKey
@@ -128,7 +122,6 @@ import {
   markAllSessionsRead,
   sessionPinId
 } from '@/store/session'
-import { $sessionDotStateById, sessionStatusBucket } from '@/store/session-dot-state'
 import { $focusedSessionIsTile, $focusedStoredSessionId } from '@/store/session-focus'
 import { $unconfirmedPinWrites } from '@/store/session-pin-sync'
 import { $removedSessionIds } from '@/store/session-removal'
@@ -172,7 +165,6 @@ import {
   ProjectMenu,
   projectTreeCwd,
   sessionBucketId,
-  sessionMatchesProjectFilter,
   sessionRecency as sessionTime,
   type SidebarProjectTree,
   type SidebarWorkspaceTree,
@@ -193,8 +185,10 @@ import {
 import { buildSessionByAnyId, resolvePinnedSessions } from './session-index'
 import { SidebarSessionsSection, VIRTUALIZE_THRESHOLD } from './sessions-section'
 import { CONTEXT_SPLIT_KIT, SplitSubmenu } from './split-submenu'
+import { UnfinishedFilterToggle } from './unfinished-work'
 import { useEnteredProjectSessions } from './use-entered-project-sessions'
 import { useServerSessionSearch } from './use-server-session-search'
+import { useSessionFilters } from './use-session-filters'
 
 // Non-session groups (messaging platforms) stay compact: show a few rows up
 // front, reveal more in larger steps on demand. Keeps a busy platform from
@@ -459,18 +453,13 @@ export function ChatSidebar({
   const panesFlipped = useStore($panesFlipped)
   const grouping = useStore($sidebarGrouping)
   const ordering = useStore($sidebarOrdering)
-  const statusFilter = useStore($sidebarStatusFilter)
   const persistedProjectFilter = useStore($sidebarProjectFilter)
-  const profileFilter = useStore($sidebarProfileFilter)
-  const prFilter = useStore($sidebarPrFilter)
   const prDataWanted = useStore($sidebarPrDataWanted)
   const prBranchOverrides = useStore($prBranchBySession)
-  const pullRequests = useStore($pullRequestsByBranch)
   const filtersActive = useStore($sidebarFiltersActive)
   const showArchived = useStore($sidebarShowArchived)
   const cardRows = useStore($sidebarCardRows)
   const archivedSessions = useStore($archivedSessions)
-  const dotStates = useStore($sessionDotStateById)
   // The active sort key as an id order. The flat list applies it within its
   // dividers; groups apply it to their own lanes.
   const sortOrderIds = useStore($sidebarSessionRankIds)
@@ -610,54 +599,13 @@ export function ChatSidebar({
     return filterSessionsByProfileScope(pool, profileScope)
   }, [sessions, archivedSessions, showArchived, profileScope])
 
-  // One predicate for the status/project filters, so the flat list and the
-  // project lanes narrow by the same rule. A project lane holds rows the loaded
-  // page may not, so it has to be answerable per session rather than by
-  // membership in the filtered set. Detached rows file under the Home bucket id
-  // (same rule as the overview overlay), so filtering to Home keeps Home's rows.
-  const sessionMatchesFilters = useCallback(
-    (session: SessionInfo) => {
-      if (statusFilter.length && !statusFilter.includes(sessionStatusBucket(dotStates[session.id]))) {
-        return false
-      }
-
-      // Narrowing to a few of the profiles on screen. Scoped to one profile the
-      // list is already that profile's, so a stale selection can't blank it.
-      if (showAllProfiles && profileFilter.length && !profileFilter.includes(normalizeProfileKey(session.profile))) {
-        return false
-      }
-
-      if (prFilter.length) {
-        const key = sessionPrKey(session)
-
-        if (!prFilter.includes(pullRequestBucket(key ? pullRequests[key] : undefined))) {
-          return false
-        }
-      }
-
-      // Same membership the sidebar groups and colors by (backend owner first,
-      // cwd walk otherwise), so a filtered row lands in the lane the user
-      // picked it from.
-      return sessionMatchesProjectFilter(session, projectFilter, projects, projectOwners)
-    },
-    [
-      statusFilter,
-      projectFilter,
-      profileFilter,
-      showAllProfiles,
-      prFilter,
-      pullRequests,
-      projects,
-      projectOwners,
-      dotStates
-    ]
-  )
-
-  const filtersNarrow =
-    statusFilter.length > 0 ||
-    projectFilter.length > 0 ||
-    prFilter.length > 0 ||
-    (showAllProfiles && profileFilter.length > 0)
+  const { anyUnfinished, filtersNarrow, sessionMatchesFilters } = useSessionFilters({
+    projectFilter,
+    projectOwners,
+    projects,
+    scopedSessions,
+    showAllProfiles
+  })
 
   const visibleSessions = useMemo(
     () => (filtersNarrow ? scopedSessions.filter(sessionMatchesFilters) : scopedSessions),
@@ -1930,6 +1878,7 @@ export function ChatSidebar({
                             }
                           }}
                         />
+                        <UnfinishedFilterToggle available={anyUnfinished} className={HEADER_NAV_BTN} />
                         <div className="grid size-6 place-items-center">
                           <SidebarFilterMenu className={HEADER_NAV_BTN} />
                         </div>

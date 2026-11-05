@@ -242,9 +242,13 @@ def _scoped_profile_targets(log_label: str, profile: Optional[str]) -> list[tupl
     return targets if scope == "all" else [(name, home) for name, home in targets if name == scope]
 
 
-def _tag_rows(rows: list[dict[str, Any]], name: str, now: float) -> list[dict[str, Any]]:
+def _tag_rows(rows: list[dict[str, Any]], name: str, now: float, home=None) -> list[dict[str, Any]]:
     """Stamp session rows with their owning profile and the 300s active heuristic; SQLite
-    stores flags as 0/1 and the sidebar needs booleans."""
+    stores flags as 0/1 and the sidebar needs booleans. ``home`` adds the ``unfinished`` marker
+    from that profile's last background scan (stamped per call: the rows may be cached)."""
+    if home is not None:
+        from hermes_cli.session_work_status import annotate_rows
+        annotate_rows(rows, home)
     for s in rows:
         s["profile"] = name
         s["is_default_profile"] = name == "default"
@@ -511,7 +515,7 @@ def get_profiles_sessions(
                 # Same SQL-level blob skip as /api/sessions.
                 compact_rows=not full, include_pinned=True, **scoped)
             totals[name] = db.session_count(exclude_children=True, **scoped)
-            merged.extend(_tag_rows(rows, name, now))
+            merged.extend(_tag_rows(rows, name, now, home))
         _read_profile_db(name, home, errors, _read)
 
     sort_key = "last_active" if order == "recent" else "started_at"
@@ -612,7 +616,7 @@ def get_profiles_sessions_sidebar(
         recents_truncated[name] = len(slices["recents"]) >= cap["recents"]
         profile_totals[name] = slices["usage"]
         for key in slice_scope:
-            rows[key].extend(_tag_rows(slices[key], name, now))
+            rows[key].extend(_tag_rows(slices[key], name, now, home))
 
     def _window(key: str) -> list[dict[str, Any]]:
         rows[key].sort(key=_recency, reverse=True)

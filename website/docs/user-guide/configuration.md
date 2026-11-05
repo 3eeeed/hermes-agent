@@ -1550,6 +1550,14 @@ No background `auto-title` thread starts and no automatic title-model request is
 explicit repair command `hermes sessions retitle-skills` still calls the model. `enabled: false`
 still disables both stages.
 
+Titles also **refresh as the session grows**. At the user turns listed in
+`auxiliary.title_generation.refresh_turns` (default `[3, 6, 10, 16, 25]`) an automatic title is
+regenerated from a digest of every message you sent, so a session that moved on to other work is
+named for all of it (e.g. `Session titles: delegate fix + rolling refresh`). A title you set with
+`/title` or `hermes sessions rename` is never refreshed. Set `refresh_turns: []` to keep the first
+title. `hermes sessions retitle-smart` applies the same logic to existing sessions (dry run unless
+`--apply`).
+
 On a `custom` main provider (llama.cpp, Ollama, vLLM, LM Studio and other self-hosted
 OpenAI-compatible servers) the title model call is sent **after** the turn's reply has
 arrived, not concurrently with it, unless `auxiliary.title_generation` is pinned to another
@@ -1703,6 +1711,7 @@ auxiliary:
   title_generation:
     enabled: true              # set false to disable auto-title generation
     model_upgrade_enabled: true  # set false to keep the instant derived title, never call a model
+    refresh_turns: [3, 6, 10, 16, 25]  # re-title from all messages at these user turns; [] disables
     provider: "auto"
     model: ""
     base_url: ""

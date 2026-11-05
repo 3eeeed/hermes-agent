@@ -28,6 +28,8 @@ def _add_rename_and_discard(sessions_subparsers) -> None:
     add_discard_parser(sessions_subparsers)
     from hermes_cli.sessions_adopt import add_adopt_parser
     add_adopt_parser(sessions_subparsers)
+    from hermes_cli.sessions_unfinished import add_unfinished_parser
+    add_unfinished_parser(sessions_subparsers)
 
 
 def _add_refresh_prompts(sessions_subparsers) -> None:
@@ -323,6 +325,23 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
     _flag(sessions_retitle, "--apply", help="Write the new titles (default: dry run)")
     sessions_retitle.add_argument(
         "--limit", type=int, default=200, help="Maximum sessions to examine (default: 200)")
+
+    sessions_smart = sessions_subparsers.add_parser(
+        "retitle-smart", help="Re-title sessions from ALL their messages, not just the first one",
+        description="Automatic titles were generated from a session's opening message, so a "
+            "session that went on to cover several tasks keeps a name for the first one. This "
+            "proposes a title naming the whole body of work for non-archived root sessions "
+            "(desktop/discord/cli/tui) with at least two user turns, including their compression "
+            "continuations. Dry run by default; --apply writes, and never replaces a title you set.")
+    _flag(sessions_smart, "--dry-run", help="List proposed titles without writing (default)")
+    _flag(sessions_smart, "--apply", help="Write the proposed titles")
+    sessions_smart.add_argument("--json-out", metavar="PATH", help="Also write the plan/result as JSON")
+    sessions_smart.add_argument("--limit", type=int, default=None, help="Maximum sessions to re-title")
+    sessions_smart.add_argument(
+        "--since", type=float, default=None, metavar="DAYS", help="Only sessions active in the last DAYS days")
+    sessions_smart.add_argument(
+        "--session-id", action="append", default=None, metavar="ID",
+        help="Only this session (ID or unique prefix; repeatable)")
 
     sessions_browse = sessions_subparsers.add_parser(
         "browse", help="Interactive session picker — browse, search, and resume sessions")

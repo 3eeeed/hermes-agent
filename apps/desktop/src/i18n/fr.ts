@@ -3636,7 +3636,8 @@ export const frOverrides = {
       open: 'Ouverte',
       merged: 'Fusionnée',
       closed: 'Fermée',
-      noPR: 'Aucune PR'
+      noPR: 'Aucune PR',
+      unfinished: 'Inachevées'
     },
     gatewayGroups: {
       grouping: 'Gateway et profil',
@@ -3723,6 +3724,7 @@ export const frOverrides = {
       backgroundRunning: 'Tâche en arrière-plan en cours',
       draftSession: 'Brouillon — aucun message envoyé',
       handoffOrigin: platform => `Transférée depuis ${platform}`,
+      unfinishedWork: count => `${count} ${count === 1 ? 'fichier modifié' : 'fichiers modifiés'} sans commit`,
       ownedByProfile: profile => `Profil : ${profile}`,
       renamed: 'Renommée',
       renameFailed: 'Échec du renommage',

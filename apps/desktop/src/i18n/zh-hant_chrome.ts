@@ -69,7 +69,8 @@ export const zhHantChrome = {
       open: '開啟',
       merged: '已合併',
       closed: '已關閉',
-      noPR: '無 PR'
+      noPR: '無 PR',
+      unfinished: '未完成'
     },
     gatewayGroups: {
       grouping: '閘道與設定檔',
@@ -215,6 +216,7 @@ export const zhHantChrome = {
       backgroundRunning: '背景任務執行中',
       draftSession: '草稿 — 尚未傳送',
       handoffOrigin: platform => `從 ${platform} 轉接`,
+      unfinishedWork: count => `${count} 個檔案已修改但未提交`,
       ownedByProfile: profile => `設定檔：${profile}`,
       renamed: '已重新命名',
       renameFailed: '重新命名失敗',

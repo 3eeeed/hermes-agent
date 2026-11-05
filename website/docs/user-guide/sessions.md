@@ -701,6 +701,22 @@ Database size: 12.4 MB
 
 For deeper analytics — token usage, cost estimates, tool breakdown, and activity patterns — use [`hermes insights`](../reference/cli-commands.md#hermes-insights).
 
+### Find Sessions With Uncommitted Work
+
+```bash
+hermes sessions unfinished            # last snapshot (refreshed by the Desktop backend)
+hermes sessions unfinished --refresh  # rescan state.db and git now
+hermes sessions unfinished --json
+```
+
+A session is *unfinished* when a file it wrote (`write_file`) or patched (`patch`) is still
+modified, staged or untracked in its git repo. Delegate runs and compression continuations count
+toward the conversation that started them; `/branch` and `/new` forks are their own. The Desktop
+sidebar marks these sessions with a small hollow amber dot (hover for the file count) and the
+sessions header offers an **Unfinished** toggle (also under **Filters**) that shows only them.
+The long-running backend rescans every 5 minutes and shortly after each turn, caching its index
+and last snapshot in `state/session_work_status.json` under the profile home.
+
 ### Refresh Prompts After a Profile Update
 
 A continuing session sends the same system prompt on every turn, the bytes it

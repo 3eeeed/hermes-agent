@@ -2701,8 +2701,14 @@ export interface ProjectTreeSession {
   _lineage_root_id?: string | null
   _lineage_ids?: string[] | null
   continuation_kind?: string | null
+  unfinished?: SessionUnfinished | null
   profile?: string | null
   [key: string]: unknown
+}
+/** ``hermes_cli.session_work_status.wire_status``: files this conversation wrote are still uncommitted in git (last background scan). Absent when clean. */
+export interface SessionUnfinished {
+  dirty_count: number
+  repos: string[]
 }
 export interface ProjectsProjectSessionsParams {
   profile?: string | null
@@ -3371,6 +3377,7 @@ export interface SessionListRow {
   live_message_count?: number | null
   source?: string
   _lineage_root_id?: string | null
+  unfinished?: SessionUnfinished | null
 }
 export interface SessionMostRecentParams {
   profile?: string | null

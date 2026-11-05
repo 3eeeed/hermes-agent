@@ -3090,7 +3090,8 @@ export const zhOverrides = {
       open: '打开',
       merged: '已合并',
       closed: '已关闭',
-      noPR: '无PR'
+      noPR: '无PR',
+      unfinished: '未完成'
     },
     profileRail: '配置档案栏',
     gatewayGroups: {
@@ -3171,6 +3172,7 @@ export const zhOverrides = {
       backgroundRunning: '后台任务运行中',
       draftSession: '草稿 — 尚未发送',
       handoffOrigin: platform => `从 ${platform} 转接`,
+      unfinishedWork: count => `${count} 个文件已修改但未提交`,
       ownedByProfile: profile => `配置档：${profile}`,
       renamed: '已重命名',
       renameFailed: '重命名失败',

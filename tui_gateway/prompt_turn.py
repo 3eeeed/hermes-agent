@@ -984,6 +984,10 @@ def _invoke_agent(
         run_kwargs["persist_user_display_metadata"] = display_metadata
     if turn_author and "turn_author" in run_params:
         run_kwargs["turn_author"] = turn_author
+    if "title_user_message" in run_params and isinstance(prompt, str) and prompt.strip():
+        # Title from what the user typed: run_message may carry per-turn notes (_prepend_note:
+        # Delegate mode, HUD surface, reactions) that must never name the session.
+        run_kwargs["title_user_message"] = prompt
     if "prelude" in run_params:
         from agent.onboarding_session import onboarding_prelude
         prelude = onboarding_prelude(agent, st.history)
@@ -1037,6 +1041,28 @@ def _invoke_debate(
     commit_external_assistant_result(
         sid, session, user_text, answer, history_version=st.history_version)
     st.result = {"final_response": answer, "messages": list(session["history"])}
+    _title_external_turn(sid, session, user_text if isinstance(user_text, str) else prompt)
+
+
+def _title_external_turn(sid: str, session: dict, user_text: str) -> None:
+    """Auto-title a turn that never ran the agent loop (Debate): same first-title + rolling-refresh
+    path as a normal turn, with the live ``session.title`` rename. Never fatal."""
+    try:
+        agent = session.get("agent")
+        if agent is None or not isinstance(user_text, str) or not user_text.strip():
+            return
+        from agent.turn_context import _maybe_title_session_at_turn_start, start_deferred_title_upgrade
+        title_key = session.get("session_key") or sid
+        agent._on_session_title = lambda t, _src, _k=title_key: _emit(
+            "session.title", sid, {"session_id": _k, "title": t})
+        with session["history_lock"]:
+            history = list(session.get("history") or [])
+        with _session_profile_runtime_scope(session):
+            _maybe_title_session_at_turn_start(agent, history, user_text)
+            # The turn is over, so an upgrade held back for a shared self-hosted endpoint can run now.
+            start_deferred_title_upgrade(agent)
+    except Exception:
+        logger.debug("Debate turn auto-title failed", exc_info=True)
 
 
 def _invoke_mode_turn(
@@ -1315,6 +1341,12 @@ def _post_turn_housekeeping(sid: str, session: dict, st: _TurnRun) -> None:
             trim_memory(reason="tui turn completion", collect=False)
     except Exception:
         logger.debug("post-turn memory trim failed", exc_info=True)
+    try:  # the turn may have written files: rescan this profile's uncommitted work soon
+        from hermes_cli.session_work_status import notify_activity
+        from hermes_constants import get_hermes_home
+        notify_activity(session.get("profile_home") or get_hermes_home())
+    except Exception:
+        logger.debug("unfinished-work rescan request failed", exc_info=True)
     if st.scopes.home is not None:
         reset_hermes_home_override(st.scopes.home)
 

@@ -2177,7 +2177,8 @@ export const jaOverrides = {
       open: 'オープン',
       merged: 'マージ済み',
       closed: 'クローズ済み',
-      noPR: 'PRなし'
+      noPR: 'PRなし',
+      unfinished: '未完了'
     },
     gatewayGroups: {
       grouping: 'ゲートウェイとプロファイル',
@@ -2254,6 +2255,7 @@ export const jaOverrides = {
       backgroundRunning: 'バックグラウンドタスク実行中',
       draftSession: '下書き — 未送信',
       handoffOrigin: platform => `${platform} から引き継ぎ`,
+      unfinishedWork: count => `未コミットの変更ファイル ${count} 件`,
       ownedByProfile: profile => `プロファイル: ${profile}`,
       renamed: '名前を変更しました',
       renameFailed: '名前の変更に失敗しました',

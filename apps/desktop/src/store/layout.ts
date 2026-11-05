@@ -64,6 +64,7 @@ const SIDEBAR_SHOW_ARCHIVED_STORAGE_KEY = 'hermes.desktop.sidebarShowArchived'
 const SIDEBAR_PROJECT_FILTER_STORAGE_KEY = 'hermes.desktop.sidebarProjectFilter'
 const SIDEBAR_PROFILE_FILTER_STORAGE_KEY = 'hermes.desktop.sidebarProfileFilter'
 const SIDEBAR_PR_FILTER_STORAGE_KEY = 'hermes.desktop.sidebarPrFilter'
+const SIDEBAR_UNFINISHED_FILTER_STORAGE_KEY = 'hermes.desktop.sidebarUnfinishedOnly'
 const SIDEBAR_WORKSPACE_ORDER_STORAGE_KEY = 'hermes.desktop.workspaceOrder'
 const SIDEBAR_WORKSPACE_PARENT_ORDER_STORAGE_KEY = 'hermes.desktop.workspaceParentOrder'
 const SIDEBAR_PROJECT_ORDER_STORAGE_KEY = 'hermes.desktop.projectOrder'
@@ -404,6 +405,14 @@ export const $sidebarPrFilter = persistentAtom<PullRequestBucket[]>(
   listOf(PR_FILTERS)
 )
 
+// Only sessions whose written files are still uncommitted in git (the backend's
+// `unfinished` row field, refreshed in the background).
+export const $sidebarUnfinishedFilter = persistentAtom(SIDEBAR_UNFINISHED_FILTER_STORAGE_KEY, false, Codecs.bool)
+
+export function toggleSidebarUnfinishedFilter() {
+  $sidebarUnfinishedFilter.set(!$sidebarUnfinishedFilter.get())
+}
+
 export const $sidebarGrouping: ReadableAtom<SidebarGrouping> = computed(
   [$sidebarAgentsGrouped, $sidebarFlatGrouping, $sidebarAllProfilesGrouping, $showAllProfiles],
   (grouped, flat, allProfiles, showAll) => (grouped ? 'project' : showAll ? allProfiles : flat)
@@ -417,9 +426,16 @@ export const $sidebarOrdering: ReadableAtom<SidebarOrdering> = computed(
 )
 
 export const $sidebarFiltersActive: ReadableAtom<boolean> = computed(
-  [$sidebarStatusFilter, $sidebarProjectFilter, $sidebarProfileFilter, $sidebarPrFilter, $sidebarShowArchived],
-  (statuses, projects, profiles, prs, archived) =>
-    statuses.length > 0 || projects.length > 0 || profiles.length > 0 || prs.length > 0 || archived
+  [
+    $sidebarStatusFilter,
+    $sidebarProjectFilter,
+    $sidebarProfileFilter,
+    $sidebarPrFilter,
+    $sidebarShowArchived,
+    $sidebarUnfinishedFilter
+  ],
+  (statuses, projects, profiles, prs, archived, unfinished) =>
+    statuses.length > 0 || projects.length > 0 || profiles.length > 0 || prs.length > 0 || archived || unfinished
 )
 
 /** Anything at all moved off the shipped view — what makes a reset worth
@@ -937,6 +953,7 @@ function clearSidebarFilters() {
   $sidebarProfileFilter.set([])
   $sidebarPrFilter.set([])
   $sidebarShowArchived.set(false)
+  $sidebarUnfinishedFilter.set(false)
 }
 
 /** Every knob the filter menu owns, back to the sidebar as it ships. Ordering
