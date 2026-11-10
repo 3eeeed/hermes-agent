@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Any, Iterator
 
@@ -48,10 +49,17 @@ class _TurnState:
     tracked: bool | None = None  # False once a review found no git repo to diff against
     interrupted: bool = False
     on_phase: Callable[[dict], None] | None = None
+    # Live-status facts for a mid-turn "what are you doing?" (agent.delegate_status).
+    phase: str = "planning"
+    goal: str = ""
+    model: str = ""
+    owner_session_id: str = ""
+    worker_started: float = 0.0
 
 
 def _publish(state: _TurnState, phase: str) -> None:
     """Tell the UI where the turn stands; a display failure never touches the turn."""
+    state.phase = phase
     if state.on_phase is None:
         return
     try:
@@ -185,7 +193,7 @@ def _workspace_for(task_id: str) -> str:
     return configured if configured and os.path.isdir(configured) else os.getcwd()
 
 
-def before_dispatch(agent: Any) -> str | None:
+def before_dispatch(agent: Any, goal: str = "", model: str = "") -> str | None:
     """Admit one worker attempt and capture its baseline; an error string refuses it."""
     task_id = getattr(agent, "_delegate_task_id", "")
     with _lock:
@@ -202,6 +210,9 @@ def before_dispatch(agent: Any) -> str | None:
     with _lock:
         state.baseline = baseline
         state.worker_running = True
+        state.goal, state.model = goal or "", model or ""
+        state.owner_session_id = str(getattr(agent, "session_id", "") or "")
+        state.worker_started = time.time()
     _publish(state, "worker")
     return None
 
@@ -284,6 +295,12 @@ def turn_note(options: dict) -> str:
         "the user asked.",
         "Tell the user what changed, what you ran and what it output; never call something verified "
         "unless you ran the check and saw it pass.",
+        "Keep the user informed while you work, in their language: right before each delegate_task "
+        "call write one short line saying what you are handing off and to which lane and model; when "
+        "a worker returns, write one short line saying what came back and what you will check next.",
+        "If the user writes to you mid-turn, reply to that message first in a short visible answer "
+        "(what you are doing, what is left, or whatever they asked), then continue the work. Never "
+        "ignore it or wait for the end of the turn to acknowledge it.",
         "Lanes:",
         *lanes,
     ])

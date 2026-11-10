@@ -68,7 +68,7 @@ def _first_request_keys(parent, monkeypatch, worker):
         raise _StopRequest("no network in tests")
 
     monkeypatch.setattr(ClientLifecycleMixin, "_build_anthropic_client_for_key", record_and_stop)
-    monkeypatch.setattr("agent.delegate_orchestrator.before_dispatch", lambda agent: None)
+    monkeypatch.setattr("agent.delegate_orchestrator.before_dispatch", lambda agent, **kw: None)
     monkeypatch.setattr("agent.delegate_orchestrator.after_dispatch", lambda agent, result: result)
     options = {"workers": [{"lane": "research", "provider": "anthropic", "model": MODEL, "effort": "medium",
                             **worker}]}

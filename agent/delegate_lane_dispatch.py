@@ -21,7 +21,9 @@ def dispatch_lane_task(agent: Any, function_args: dict) -> str | None:
         return tool_error(lane_error)
     if lane_route is None or (function_args.get("action") or "spawn") != "spawn":
         return None
-    if (refusal := before_dispatch(agent)) is not None:
+    goals = [t.get("goal") for t in tasks if isinstance(t, dict)] if isinstance(tasks, list) else []
+    goal = function_args.get("goal") or " | ".join(str(g) for g in goals if g)
+    if (refusal := before_dispatch(agent, goal=str(goal or ""), model=str(lane_route.get("model") or ""))) is not None:
         return tool_error(refusal)
     return after_dispatch(agent, delegate_task(
         goal=function_args.get("goal"), context=function_args.get("context"),

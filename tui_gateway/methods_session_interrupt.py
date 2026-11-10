@@ -130,6 +130,15 @@ def _apply_correction(rid, session: dict, verb: str, text: str, accepted_status:
     return _ok(rid, {"status": accepted_status if accepted else "rejected", "text": text})
 
 
+def _ack_delegate_worker_wait(sid: str, session: dict) -> None:
+    """A Delegate orchestrator blocked on its worker reads the steer only when the worker returns:
+    answer the user now with the worker's live status so the message is never met with silence."""
+    from agent.delegate_status import status_reply
+    text = status_reply(str(getattr(session.get("agent"), "_delegate_task_id", "") or ""))
+    if text:
+        _emit("message.interim", sid, {"text": text, "already_streamed": False})
+
+
 def _correction_method(name: str, verb: str, accepted_status: str, supported, unsupported: str):
     """steer/redirect RPC: ``params.text`` (4002, checked before the session) into a live session;
     ``supported(agent)`` gates 4010."""
@@ -163,7 +172,13 @@ def _correction_method(name: str, verb: str, accepted_status: str, supported, un
         # row (#64578). 'rejected' makes the client queue it as a normal next prompt.
         if verb == "steer" and not session.get("running"):
             return _ok(rid, {"status": "rejected", "text": text})
-        return _apply_correction(rid, session, verb, text, accepted_status)
+        response = _apply_correction(rid, session, verb, text, accepted_status)
+        if (response.get("result") or {}).get("status") == accepted_status:
+            try:
+                _ack_delegate_worker_wait(params.get("session_id") or "", session)
+            except Exception:
+                logger.debug("delegate status ack failed", exc_info=True)
+        return response
 
 
 # Inject text into the next tool result without interrupting (AIAgent.steer(): no new user turn, no role
