@@ -509,6 +509,7 @@ def _anthropic_scoped_windows(payload: dict, taken: set[str]) -> list[AccountUsa
     Entries without a model scope are skipped: they duplicate windows already
     built from the top-level keys.
     """
+    from agent.account_usage_nous import _is_finite_num  # moved to the Nous sibling upstream
     windows: list[AccountUsageWindow] = []
     for limit in payload.get("limits") or []:
         if not isinstance(limit, dict):

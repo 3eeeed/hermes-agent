@@ -30,7 +30,8 @@ def test_forum_post_inherits_forum_folder_and_pins_agent_cwd(tmp_path):
     assert runner._channel_cwd_for(post) == str(proj)
     assert runner._channel_cwd_for(other) is None
 
-    tokens = runner._set_session_env(types.SimpleNamespace(source=post, session_key="k1", session_id="s1"))
+    tokens = runner._set_session_env(types.SimpleNamespace(source=post, session_key="k1", session_id="s1",
+                                                         actor_user_id=None, actor_user_name=None, turn_event=None))
     try:
         from agent.runtime_cwd import resolve_agent_cwd
         assert resolve_agent_cwd() == proj
