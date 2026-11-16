@@ -57,6 +57,7 @@ import { resolveVersionStatus } from '@/lib/version-status'
 import { requestGatewayForActiveRoute } from '@/store/active-route-request'
 import type { ApprovalModeRequester } from '@/store/approval-mode'
 import { $draftAnthropicCredentialSelection, $draftCodexCredentialSelection, setDraftAnthropicCredentialSelection, setDraftCodexCredentialSelection } from '@/store/codex-credential-selection'
+import { $cloudOwnsUpdates } from '@/store/cloud-updates'
 import { copyFilePath, revealFile, shouldOfferLocalReveal } from '@/store/file-actions'
 import { $freeTierSignInOpen, $freeTierStatus, FREE_TIER_MODEL } from '@/store/free-tier'
 import { openFreeTierSignIn } from '@/store/free-tier-sign-in'
@@ -120,11 +121,12 @@ function versionItem(
   target: 'backend' | 'client',
   status: ReturnType<typeof resolveVersionStatus>,
   applying: boolean,
-  toggleLabel: string
+  toggleLabel: string,
+  hidden = false
 ): StatusbarItem {
   return {
     className: status.hasUpdate ? 'text-primary hover:text-primary' : undefined,
-    hidden: status.unknown,
+    hidden: status.unknown || hidden,
     icon: applying ? <Loader2 className="size-3 animate-spin" /> : <Hash className="size-3" />,
     id: `version-${target}`,
     label: status.label,
@@ -230,6 +232,7 @@ export function useStatusbarItems({
   const backendUpdateApply = useStore($backendUpdateApply)
   const desktopVersion = useStore($desktopVersion)
   const connection = useStore($connection)
+  const cloudOwnsUpdates = useStore($cloudOwnsUpdates)
 
   // The FOCUSED session (interacted tile, else the primary — the same
   // derivation the titlebar title follows): every session-scoped readout
@@ -509,8 +512,10 @@ export function useStatusbarItems({
       version: desktopVersion?.appVersion
     })
 
-    return versionItem('client', status, applying, copy.toggleVersion)
+    // A Webapp served by Hermes Cloud: Cloud updates it, so there is no version/update pill to open.
+    return versionItem('client', status, applying, copy.toggleVersion, cloudOwnsUpdates.client)
   }, [
+    cloudOwnsUpdates.client,
     desktopVersion?.appVersion,
     connection?.mode,
     copy,
@@ -522,7 +527,8 @@ export function useStatusbarItems({
   ])
 
   const backendVersionItem = useMemo<StatusbarItem | null>(() => {
-    if (connection?.mode !== 'remote') {
+    // Hermes Cloud updates its agents itself: no backend pill, as outside remote mode.
+    if (connection?.mode !== 'remote' || cloudOwnsUpdates.backend) {
       return null
     }
 
@@ -543,6 +549,7 @@ export function useStatusbarItems({
 
     return versionItem('backend', status, applying, copy.toggleBackendVersion)
   }, [
+    cloudOwnsUpdates.backend,
     connection?.mode,
     statusSnapshot?.version,
     backendUpdateStatus,

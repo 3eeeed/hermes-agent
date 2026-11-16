@@ -25,7 +25,8 @@ export interface GatewayEventDeps {
     persistedTurn?: PersistedTurn | null,
     responseTransformed?: boolean,
     status?: string,
-    responseReused?: boolean
+    responseReused?: boolean,
+    failureReason?: string
   ) => void
   /** Returns the id of the row that ended up carrying the failure — the live assistant
    *  bubble it sealed, or the one it minted. */

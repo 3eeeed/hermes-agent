@@ -73,7 +73,9 @@ import {
   $yoloActive,
   idsShareLineage,
   type NewChatWorkspaceTarget,
+  ownerLookupSessionRows,
   resolveComposerSessionKey,
+  restoreComposerModelSelection,
   rotateFreshDraftKey,
   sessionPinId,
   setActiveSessionId,
@@ -169,9 +171,11 @@ import {
 } from './restore-pending-clarify'
 import { projectPendingConnection, restorePendingConnectionFromSnapshot } from './restore-pending-connection'
 import {
+  activatedTurnAdmission,
   type GraftedTranscriptPage,
   graftTranscriptPage,
   prefetchServesResume,
+  recoveredTurnFields,
   rereadPageAfterResumeBarrier
 } from './resume-barrier-reread'
 import { clearResumeLatches, clearResumeToasts, notifyResumeFailed, type ResumeAttemptOptions } from './resume-latches'
@@ -554,12 +558,9 @@ export function useSessionActions({
       setCurrentUsage({ calls: 0, input: 0, output: 0, total: 0 })
       setSessionStartedAt(null)
       setTurnStartedAt(null)
-      // The composer's model/effort/fast is sticky UI state (persisted in
-      // localStorage) — a new chat FOLLOWS your last pick instead of snapping
-      // back to the profile default, so we deliberately don't reset it here. The
-      // profile default still owns first-run seeding and profile switches (see
-      // refreshCurrentModel). Keep the canonical service tier too: clearing
-      // it while retaining fast=true would silently downgrade Ultrafast.
+      // Follow the user's sticky pick, not the outgoing runtime/fallback display.
+      restoreComposerModelSelection()
+      // Keep effort/fast/service tier: clearing the tier could downgrade Ultrafast.
       setYoloActive(false)
       setNewChatWorkspaceTarget(hasWorkspaceTarget ? workspaceTarget : undefined)
       // #52589 provenance: only a deliberate string workspace target is an explicit
@@ -1310,7 +1311,7 @@ export function useSessionActions({
         () => isCurrentResume() && !resumedSameSelectedSession && !takeWarmCache()
       )
 
-      const listedStored = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
+      const listedStored = ownerLookupSessionRows().find(session => sessionMatchesStoredId(session, storedSessionId))
 
       if (ownerRoute || listedStored?.profile) {
         provisional.paint(transcriptRestScope(ownerRoute, listedStored, ambientConnectionId))
@@ -1381,8 +1382,7 @@ export function useSessionActions({
         const cachedRuntimeId = warmHit.runtimeId
         const cachedState = warmHit.state
 
-        const stored =
-          $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId)) ?? storedForProfile
+        const stored = findListedSession(storedSessionId)?.session ?? storedForProfile
 
         let cachedViewState =
           !cachedState.model && stored?.model != null
@@ -1640,6 +1640,7 @@ export function useSessionActions({
                   // without ever having received its prompt, so the settle
                   // path must not take the "I saw it all" shortcut.
                   adoptedRunningTurn: state.adoptedRunningTurn || running,
+                  turnAdmissionId: activatedTurnAdmission(state, activateBaselineState, activated.pending),
                   turnStartedAt: running ? (activatedTurnStartedAt ?? state.turnStartedAt ?? Date.now()) : null,
                   ...(earlyClarifyProjection
                     ? {
@@ -1950,8 +1951,7 @@ export function useSessionActions({
       const runtimeStartedAt = Date.now()
       setSessionStartedAt(runtimeStartedAt)
 
-      const stored =
-        $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId)) ?? storedForProfile
+      const stored = findListedSession(storedSessionId)?.session ?? storedForProfile
 
       applyStoredSessionPreviewRuntimeInfo(stored, storedSessionId, { sameSession: resumedSameSelectedSession })
 
@@ -1998,6 +1998,7 @@ export function useSessionActions({
 
         let resumeRuntimeBaselineMessages: ChatMessage[] = []
         const resumeStartedAt = Date.now() / 1000
+        const statesAtResumeStart = new Map(sessionStateByRuntimeIdRef.current)
 
         const resumePromise = singleFlightSessionResume(
           storedSessionId,
@@ -2078,8 +2079,8 @@ export function useSessionActions({
 
         const reread = await rereadPageAfterResumeBarrier(resumed, prefetchedPage, storedSessionId, sessionRestScope)
 
-        if (reread) {
-          ;({ page: prefetchedResult, snapshot: localSnapshot, transcript: prefetchedTranscriptMessages } = reread)
+        if (reread.page) {
+          ;({ page: prefetchedResult, snapshot: localSnapshot, transcript: prefetchedTranscriptMessages } = reread.page)
         }
 
         if (!isCurrentResume()) {
@@ -2181,14 +2182,13 @@ export function useSessionActions({
           )
         }
 
-        // Crash-survivable turn progress: fold a journaled in-flight tail
-        // (persisted by use-session-state-cache while the turn streamed;
-        // survives renderer/app death) back onto the restored transcript. The
-        // backend's own inflight projection is already inside
-        // `preferredWithRuntimeChanges`, so this merge only adds the locally
-        // recorded structure that the backend's text-only snapshot cannot carry.
+        // Crash-survivable turn progress: fold a journaled in-flight tail (persisted while the turn streamed;
+        // survives renderer/app death) back onto the restored transcript. The backend's own inflight projection
+        // is already inside `preferredWithRuntimeChanges`, so this merge only adds the structure its text-only
+        // snapshot cannot carry, and nothing once the owner's pending list shows the journaled turn finished.
         const inFlightRecovery = recoverInFlightTurnJournal(storedSessionId, preferredWithRuntimeChanges, {
-          keepPending: resumedRunning
+          keepPending: resumedRunning,
+          owner: reread.owner
         })
 
         recoveredInFlightTail = inFlightRecovery.applied
@@ -2262,14 +2262,6 @@ export function useSessionActions({
 
         patchSessionWorkspace(storedSessionId, runtimeInfo?.cwd)
 
-        // Preserve the turn-elapsed timer across cold resume: the gateway
-        // reports when the in-flight turn started so the desktop can restore
-        // the clock instead of resetting it to 0:00.
-        const resumedTurnStartedAt =
-          typeof resumed.turn_started_at === 'number' && resumed.turn_started_at > 0
-            ? resumed.turn_started_at * 1000
-            : null
-
         const pendingClarifyProjection = pendingClarify
           ? restorePendingClarifyToolCall(messagesForView, pendingClarifyToolPayload(pendingClarify))
           : null
@@ -2323,15 +2315,7 @@ export function useSessionActions({
               Boolean(pendingConnection) ||
               (clarifyAuthoritativelyAbsent ? false : state.needsInput),
             adoptedRunningTurn: state.adoptedRunningTurn || resumedRunning,
-            ...(inFlightRecovery.applied
-              ? {
-                  sawAssistantPayload: true,
-                  // Point live deltas at the recovered row when the backend is
-                  // still mid-turn; a settled recovery keeps the stream idle.
-                  streamId: resumedRunning ? inFlightRecovery.streamId : null,
-                  turnStartedAt: resumedRunning ? (inFlightRecovery.turnStartedAt ?? resumedTurnStartedAt) : null
-                }
-              : { turnStartedAt: resumedRunning && resumedTurnStartedAt !== null ? resumedTurnStartedAt : null }),
+            ...recoveredTurnFields(inFlightRecovery, resumed, resumedRunning, state, statesAtResumeStart),
             ...livePromptStreamId(pendingConnectionProjection, pendingClarifyProjection),
             ...(clearedClarifyProjection
               ? {
